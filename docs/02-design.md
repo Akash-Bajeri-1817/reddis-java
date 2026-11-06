@@ -40,3 +40,15 @@ Consequence: Smaller scope, full redis-cli compatibility.
 ### ADR-4: No external runtime dependencies
 Decision: JDK only; JUnit is test-scoped.
 Consequence: Everything is built from scratch, which is the point of the project.
+
+### ADR-5: ByteArrayKey wrapper instead of String or raw byte[] as map key
+Context: Keys arrive as byte[]. Arrays use identity-based equals/hashCode, so a raw byte[]
+cannot be a HashMap key. Converting to String would corrupt non-UTF-8 binary keys (ADR-2).
+Decision: Wrap keys in an immutable-by-convention ByteArrayKey with content-based
+equals/hashCode and a cached hash.
+Consequence: Binary-safe keys with O(1) lookup, at the cost of one small wrapper object per operation.
+
+### ADR-6: Constructor injection for the DataStore
+Context: Several commands must share one store, and tests need isolated stores.
+Decision: Create the DataStore once in Main and pass it to each command's constructor.
+Consequence: No global state or singletons; commands are easy to unit test.
