@@ -52,3 +52,18 @@ Consequence: Binary-safe keys with O(1) lookup, at the cost of one small wrapper
 Context: Several commands must share one store, and tests need isolated stores.
 Decision: Create the DataStore once in Main and pass it to each command's constructor.
 Consequence: No global state or singletons; commands are easy to unit test.
+
+### ADR-7: Virtual thread per connection for the blocking server
+Context: Module 1 served one client at a time. Platform threads are costly (OS thread, ~1 MB
+stack); a fixed pool with blocking I/O lets idle clients starve new ones.
+Decision: Use Executors.newVirtualThreadPerTaskExecutor() (Java 21), one virtual thread per client.
+The Server receives the ExecutorService by injection and owns its shutdown.
+Consequence: Simple blocking code scales to thousands of connections. This model is temporary:
+Module 6 replaces it with a single-threaded NIO event loop, as real Redis does.
+
+### ADR-8: ConcurrentHashMap in DataStore; per-key atomicity only
+Context: Many client threads share one store.
+Decision: Back DataStore with ConcurrentHashMap. Each single-key operation is atomic.
+Read-modify-write operations (future INCR etc.) must use atomic methods such as merge/compute.
+Consequence: No lost writes or corruption. Multi-key commands (DEL a b c) are not atomic as a
+group until the single-threaded event loop of Module 6.
