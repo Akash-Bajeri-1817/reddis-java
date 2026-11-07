@@ -116,8 +116,8 @@ class KeyValueCommandsTest {
     }
 
     @Test
-    void setWithOptionsIsASyntaxErrorForNow() {
-        RespValue reply = run("SET", "k", "v", "EX", "10");
+    void setWithAnUnsupportedOptionIsASyntaxError() {
+        RespValue reply = run("SET", "k", "v", "NX");
         assertEquals(new RespValue.RespError("ERR syntax error"), reply);
     }
 
