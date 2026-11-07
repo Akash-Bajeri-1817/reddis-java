@@ -11,6 +11,8 @@ import com.reddis.server.Server;
 import com.reddis.storage.DataStore;
 
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class Main {
 
@@ -19,7 +21,6 @@ public class Main {
     public static void main(String[] args) throws IOException {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : DEFAULT_PORT;
 
-        // One store, shared by every command that needs data.
         DataStore store = new DataStore();
 
         CommandRouter router = new CommandRouter();
@@ -30,6 +31,16 @@ public class Main {
         router.register("DEL", new DelCommand(store));
         router.register("EXISTS", new ExistsCommand(store));
 
-        new Server(port, router).start();
+        // ADR-7: one cheap virtual thread per client connection.
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        //ExecutorService executor = Executors.newFixedThreadPool(2);
+        Server server = new Server(port, router, executor);
+
+        // Runs on Ctrl+C / SIGTERM so connections are closed cleanly.
+        Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "reddis-shutdown"));
+
+        // start() returns right away. The JVM stays alive because the acceptor is a
+        // normal (non-daemon) platform thread; virtual threads are always daemon threads.
+        server.start();
     }
 }
