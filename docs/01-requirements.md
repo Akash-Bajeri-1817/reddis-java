@@ -31,7 +31,7 @@ data structures and persistence internals.
 | FR-4 | Server shall support SET, GET, DEL, EXISTS | 2 |
 | FR-5 | Server shall return a RESP error for unknown commands | 2 |
 | FR-6 | Server shall serve multiple clients concurrently | 3 |
-| FR-7 | Server shall support EXPIRE, TTL and SET with EX | 4 |
+| FR-7 | Server shall support EXPIRE, PEXPIRE, TTL, PTTL, PERSIST and SET with EX/PX | 4 |
 | FR-8 | Server shall support list, hash, set and sorted-set commands | 5 |
 | FR-9 | Server shall persist data and recover it after restart | 7 |
 | FR-10 | Server shall evict keys when memory limit is reached | 8 |
