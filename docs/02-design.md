@@ -67,3 +67,21 @@ Decision: Back DataStore with ConcurrentHashMap. Each single-key operation is at
 Read-modify-write operations (future INCR etc.) must use atomic methods such as merge/compute.
 Consequence: No lost writes or corruption. Multi-key commands (DEL a b c) are not atomic as a
 group until the single-threaded event loop of Module 6.
+
+### ADR-9: Injected java.time.Clock; wall-clock time for expiry
+Context: Expiry needs "now". System.nanoTime() is monotonic but meaningless across restarts;
+persistence (Module 7) and replication need absolute timestamps.
+Decision: Store absolute expiry as epoch milliseconds from an injected Clock (Clock.systemUTC() in
+production, MutableClock in tests).
+Consequence: Expiry logic is tested instantly and deterministically. A wall-clock jump
+(NTP correction) can expire keys early or late; real Redis accepts the same trade-off.
+
+### ADR-10: Hybrid expiry: lazy on access plus active purge via DelayQueue
+Context: Lazy-only expiry leaks memory for keys that are never read again. Redis samples random
+keys for active expiry, but ConcurrentHashMap cannot sample randomly.
+Decision: Lazy expiry on every access, plus a DelayQueue index of (key, due time) drained by a
+background ExpiryPurger every 100 ms. Entries are immutable; removals are conditional
+(remove(key, entry)) and every queue item is re-validated against the live entry.
+Consequence: Expired keys are freed without being read; stale queue items can never delete newer
+data. Known limitation: overwritten or persisted keys leave a small stale item in the queue until
+its original time passes (a cancellable timer wheel or skip-list index could fix this later).
