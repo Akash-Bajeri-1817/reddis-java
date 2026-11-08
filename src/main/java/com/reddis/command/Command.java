@@ -5,6 +5,7 @@ import com.reddis.protocol.RespValue;
 import java.util.List;
 
 /** One Redis command (PING, ECHO, later SET, GET, ...). This is the Command pattern. */
+@FunctionalInterface
 public interface Command {
 
     /**

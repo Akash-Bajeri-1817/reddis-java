@@ -7,21 +7,21 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
- * The in-memory key-value storage with key expiry. Knows nothing about RESP or commands.
+ * The in-memory storage: key -> typed value (string, list, hash, set, ...), with optional expiry.
+ * Knows nothing about RESP or commands.
  *
- * Thread-safe: every method is atomic for the single key it touches.
+ * THREAD SAFETY
+ *  - Every method is atomic for the single key it touches.
+ *  - Strings are immutable byte arrays. Collections are MUTABLE and not thread-safe themselves, so they
+ *    are only ever touched inside access(), which runs under ConcurrentHashMap.compute(): exclusive per key.
  *
- * EXPIRY DESIGN
- *  - Each key maps to an immutable Entry(value, expireAtMillis). Changing a timeout replaces the
- *    whole Entry in one atomic map operation.
- *  - LAZY expiry: every access checks the deadline; an expired key behaves like a missing key and
- *    is removed on the spot.
- *  - ACTIVE expiry: every timed key also gets an ExpiryItem in a DelayQueue. purgeExpired() drains
- *    the items that are due and removes keys that really are expired. The queue is only a HINT:
- *    items can be stale (the key was overwritten, extended or persisted since), so each item is
- *    re-validated against the live entry before anything is deleted.
+ * EXPIRY DESIGN (see ADR-9, ADR-10)
+ *  - Each key maps to an immutable Entry(value, expireAtMillis). Lazy expiry on access plus an active
+ *    purge driven by a DelayQueue of (key, due time) hints that are re-validated before deleting.
  */
 public class DataStore {
 
@@ -33,14 +33,15 @@ public class DataStore {
     private static final long NO_EXPIRY = -1;
 
     /**
-     * Immutable. Deliberately does NOT override equals(): the conditional remove(key, entry) relies on
-     * identity comparison to delete exactly this entry and never a newer one.
+     * Immutable wrapper of (value, deadline). Deliberately does NOT override equals(): the conditional
+     * remove(key, entry) relies on identity comparison. Note the VALUE inside may be a mutable collection;
+     * the Entry only guarantees that value and deadline are swapped together atomically.
      */
     private static final class Entry {
-        final byte[] value;
+        final RedisValue value;
         final long expireAtMillis; // absolute wall-clock time, or NO_EXPIRY
 
-        Entry(byte[] value, long expireAtMillis) {
+        Entry(RedisValue value, long expireAtMillis) {
             this.value = value;
             this.expireAtMillis = expireAtMillis;
         }
@@ -71,6 +72,11 @@ public class DataStore {
         }
     }
 
+    /** A tiny typed box to carry a result out of a lambda. */
+    private static final class Result<R> {
+        R value;
+    }
+
     private final ConcurrentMap<ByteArrayKey, Entry> data = new ConcurrentHashMap<>();
     private final DelayQueue<ExpiryItem> expiryQueue = new DelayQueue<>();
     private final Clock clock;
@@ -84,14 +90,15 @@ public class DataStore {
         this.clock = Objects.requireNonNull(clock);
     }
 
-    // ---------------------------------------------------------------- writes
+    // --------------------------------------------------------------- strings
 
-    /** Stores the value with no timeout, replacing any existing value AND any existing timeout. */
+    /** Stores a string with no timeout, replacing any existing value of ANY type and any timeout. */
     public void set(byte[] key, byte[] value) {
-        data.put(new ByteArrayKey(key), new Entry(Objects.requireNonNull(value, "value must not be null"), NO_EXPIRY));
+        Objects.requireNonNull(value, "value must not be null");
+        data.put(new ByteArrayKey(key), new Entry(new StringValue(value), NO_EXPIRY));
     }
 
-    /** Stores the value, expiring ttlMillis from now. Replaces any existing value and timeout. */
+    /** Stores a string, expiring ttlMillis from now. Replaces any existing value and timeout. */
     public void set(byte[] key, byte[] value, long ttlMillis) {
         if (ttlMillis <= 0) {
             throw new IllegalArgumentException("ttlMillis must be positive");
@@ -99,12 +106,80 @@ public class DataStore {
         Objects.requireNonNull(value, "value must not be null");
         ByteArrayKey k = new ByteArrayKey(key);
         long expireAt = expireAtFor(ttlMillis);
-        data.put(k, new Entry(value, expireAt));
+        data.put(k, new Entry(new StringValue(value), expireAt));
         expiryQueue.add(new ExpiryItem(k, expireAt));
     }
 
     /**
-     * Sets a timeout on an existing, live key. A zero or negative ttl deletes the key immediately.
+     * @return the string value, or null if the key does not exist or has expired
+     * @throws WrongTypeException if the key holds something other than a string
+     */
+    public byte[] get(byte[] key) {
+        Entry entry = live(new ByteArrayKey(key));
+        if (entry == null) {
+            return null;
+        }
+        if (entry.value instanceof StringValue string) {
+            return string.bytes();
+        }
+        throw new WrongTypeException();
+    }
+
+    // ----------------------------------------------------------- collections
+
+    /**
+     * Runs {@code action} on the collection stored at {@code key}, atomically for that key.
+     *
+     *  - Key missing or expired: {@code factory} builds a fresh empty collection that the action receives.
+     *    If the action leaves it non-empty it is stored (without timeout); if it stays empty nothing is stored.
+     *    So write commands create keys and read commands on missing keys are harmless.
+     *  - Key holds a different type: throws WrongTypeException and nothing changes.
+     *  - After the action, a collection that became empty is removed (Redis never keeps empty collections).
+     *  - An existing key keeps its timeout.
+     *
+     * The action runs while the key is locked: keep it short, never call this store from inside it, and
+     * never let a reference to the collection escape (return copies or primitives).
+     *
+     * @param type    type token, because generics are erased at runtime (see Concepts)
+     * @param factory creates an empty collection, e.g. ListValue::new
+     */
+    public <V extends RedisValue, R> R access(byte[] key, Class<V> type, Supplier<V> factory, Function<V, R> action) {
+        ByteArrayKey k = new ByteArrayKey(key);
+        long now = clock.millis();
+        Result<R> result = new Result<>();
+
+        data.compute(k, (ignored, existing) -> {
+            boolean live = existing != null && !existing.isExpiredAt(now);
+            V collection;
+            if (!live) {
+                collection = factory.get();
+            } else if (type.isInstance(existing.value)) {
+                collection = type.cast(existing.value);
+            } else {
+                throw new WrongTypeException(); // compute() rethrows and leaves the mapping untouched
+            }
+
+            result.value = action.apply(collection);
+
+            if (collection.isEmpty()) {
+                return null;                      // delete the key (or never create it)
+            }
+            return live ? existing : new Entry(collection, NO_EXPIRY);
+        });
+
+        return result.value;
+    }
+
+    /** @return "string", "list", "hash", "set", ... or "none" if the key does not exist */
+    public String type(byte[] key) {
+        Entry entry = live(new ByteArrayKey(key));
+        return entry == null ? "none" : entry.value.typeName();
+    }
+
+    // ------------------------------------------------- expiry (any value type)
+
+    /**
+     * Sets a timeout on an existing, live key of any type. A zero or negative ttl deletes the key immediately.
      *
      * @return true if the key existed (and was updated or deleted), false if it was missing/expired
      */
@@ -115,7 +190,6 @@ public class DataStore {
         boolean[] applied = {false};
         boolean[] scheduled = {false};
 
-        // computeIfPresent runs atomically for this key: no other thread can change it meanwhile.
         data.computeIfPresent(k, (ignored, entry) -> {
             if (entry.isExpiredAt(now)) {
                 return null;                          // already dead: clean it up, report "missing"
@@ -157,14 +231,6 @@ public class DataStore {
         return old != null && !old.isExpiredAt(clock.millis());
     }
 
-    // ----------------------------------------------------------------- reads
-
-    /** @return the stored value, or null if the key does not exist or has expired */
-    public byte[] get(byte[] key) {
-        Entry entry = live(new ByteArrayKey(key));
-        return entry == null ? null : entry.value;
-    }
-
     public boolean exists(byte[] key) {
         return live(new ByteArrayKey(key)) != null;
     }
@@ -184,12 +250,12 @@ public class DataStore {
         return Math.max(0, entry.expireAtMillis - clock.millis());
     }
 
-    /** Number of stored entries, INCLUDING expired ones not yet purged. */
+    /** Number of stored keys, INCLUDING expired ones not yet purged. */
     public int size() {
         return data.size();
     }
 
-    // ---------------------------------------------------------------- expiry
+    // ---------------------------------------------------------------- purging
 
     /**
      * Active expiry: removes every key whose deadline has passed. Called periodically by ExpiryPurger.
@@ -214,7 +280,7 @@ public class DataStore {
             return null;
         }
         if (entry.isExpiredAt(clock.millis())) {
-            data.remove(key, entry); // conditional: only if it is STILL this entry (see class notes)
+            data.remove(key, entry); // conditional: only if it is STILL this entry
             return null;
         }
         return entry;
@@ -224,7 +290,7 @@ public class DataStore {
         Entry entry = data.get(key);
         return entry != null
                 && entry.isExpiredAt(clock.millis())
-                && data.remove(key, entry); // false if someone replaced the entry in the meantime
+                && data.remove(key, entry);
     }
 
     private long expireAtFor(long ttlMillis) {
