@@ -85,3 +85,18 @@ background ExpiryPurger every 100 ms. Entries are immutable; removals are condit
 Consequence: Expired keys are freed without being read; stale queue items can never delete newer
 data. Known limitation: overwritten or persisted keys leave a small stale item in the queue until
 its original time passes (a cancellable timer wheel or skip-list index could fix this later).
+
+### ADR-11: Typed values behind DataStore.access() with per-key exclusivity
+Context: Lists, hashes and sets are mutable and not thread-safe, but many client threads share the store.
+Decision: Map values are RedisValue objects (string, list, hash, set). Collections are only touched inside
+DataStore.access(key, type, factory, action), which runs inside ConcurrentHashMap.compute and is therefore
+exclusive per key. Missing keys yield a fresh empty collection that is stored only if non-empty; collections
+that become empty are deleted. Collections use LinkedHashMap/LinkedHashSet/ArrayDeque.
+Consequence: Per-key atomic commands with no locks in command code, Redis semantics for empty and missing
+keys, deterministic iteration order. Multi-key commands (SINTER, LMOVE) are not supported until Module 6.
+
+### ADR-12: WRONGTYPE as a stackless exception translated by the router
+Context: Every command on a collection must fail identically when the key holds another type.
+Decision: The storage layer throws WrongTypeException (stack trace disabled); CommandRouter converts it
+into the RESP error once.
+Consequence: No repeated type checks in commands and cheap error paths.
