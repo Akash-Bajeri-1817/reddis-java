@@ -116,3 +116,27 @@ equal for Redis but not for Double.compare; Double.toString prints 1.0 and 1.0E1
 Decision: Validate scores with a decimal regex plus inf/-inf and reject overflow, normalize -0.0 to 0.0, and
 print scores with BigDecimal.valueOf(d).stripTrailingZeros().toPlainString().
 Consequence: Scores can never be NaN, ordering is total, and replies match redis-cli expectations.
+
+### ADR-15: Single-threaded NIO event loop as the default server (supersedes ADR-7 for the default path)
+Context: Thread-per-client (ADR-7) needs a thread-safe store and cannot make multi-key commands atomic.
+Redis itself runs all commands on one thread driven by an I/O multiplexer.
+Decision: EventLoopServer uses one Selector and non-blocking SocketChannels. One thread accepts, reads,
+executes every command and writes. The thread-per-client Server remains available via --blocking for benchmarks.
+Consequence: Every command (including MSET/MGET) is atomic without locks; cost per connection is a few KB of
+buffers; one slow command delays all clients and only one core is used. DataStore keeps its concurrent
+structures because the legacy server still needs them (simplifying it is optional later).
+
+### ADR-16: Per-connection buffers, decode-from-command-start, hard limits and backpressure
+Context: TCP delivers arbitrary fragments; a single thread must never block on, or buffer unboundedly for, one client.
+Decision: RespDecoder returns a command or null (leaving the position untouched) and the loop re-decodes from the
+command's start when more bytes arrive. Pending replies are kept in an output buffer flushed with OP_WRITE,
+registered only while output is pending. Input and output buffers are capped at 64 MB (the connection is closed past
+it) and reading is paused while more than 1 MB of replies is unsent.
+Consequence: Correct for any fragmentation, pipelining is batched into few writes, slow readers cannot exhaust
+memory. Re-parsing is O(n) per read for a large multi-argument command; a resumable parser could fix that.
+
+### ADR-17: Periodic work runs inside the event loop
+Context: Expiry purging used a separate thread that touched the shared store.
+Decision: The loop's select timeout drives a periodic task (every 100 ms) that calls DataStore.purgeExpired().
+Consequence: No extra thread or locking for expiry, the same model as Redis's serverCron. A long purge would delay I/O,
+so purgeExpired must stay cheap (it only touches keys that are due).
