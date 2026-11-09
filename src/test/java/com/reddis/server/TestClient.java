@@ -9,6 +9,8 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /** A tiny RESP client for tests: sends a command, returns the reply as a simple String. */
 final class TestClient implements AutoCloseable {
@@ -26,7 +28,8 @@ final class TestClient implements AutoCloseable {
 
     /**
      * Sends one command and returns the reply:
-     * "+OK" -> "OK", ":1" -> "1", "$5 hello" -> "hello", null bulk -> "(nil)", errors -> the raw line.
+     * "+OK" -> "OK", ":1" -> "1", "$5 hello" -> "hello", null bulk -> "(nil)", errors -> the raw line,
+     * arrays -> "[a,b,c]".
      */
     String send(String... parts) throws IOException {
         StringBuilder command = new StringBuilder("*").append(parts.length).append("\r\n");
@@ -46,8 +49,20 @@ final class TestClient implements AutoCloseable {
             case '+', ':' -> rest;
             case '-' -> line;
             case '$' -> readBulk(Integer.parseInt(rest));
+            case '*' -> readArray(Integer.parseInt(rest));
             default -> throw new IOException("unexpected reply: " + line);
         };
+    }
+
+    private String readArray(int count) throws IOException {
+        if (count < 0) {
+            return "(nil)";
+        }
+        List<String> items = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            items.add(readReply());
+        }
+        return "[" + String.join(",", items) + "]";
     }
 
     private String readBulk(int length) throws IOException {
