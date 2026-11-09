@@ -100,3 +100,19 @@ Context: Every command on a collection must fail identically when the key holds 
 Decision: The storage layer throws WrongTypeException (stack trace disabled); CommandRouter converts it
 into the RESP error once.
 Consequence: No repeated type checks in commands and cheap error paths.
+
+### ADR-13: Sorted set = hash map + hand-written skip list with spans
+Context: Sorted sets need O(1) score lookup plus ordered access and rank in O(log n). TreeMap offers order
+but not rank (headSet().size() is O(n)); an order-statistic tree needs subtree sizes maintained through rotations.
+Decision: Keep a HashMap<member, score> and a SkipList ordered by (score, member bytes) whose forward
+pointers carry spans (as in Redis). Level promotion probability 1/4, max 32 levels. Both structures are only
+mutated together inside DataStore.access(). SkipList.validate() checks all invariants for tests.
+Consequence: ZRANK and ZRANGE by position are O(log n); no rebalancing code; about 1.33 pointers per node.
+Time bounds are expected (probabilistic), not worst case.
+
+### ADR-14: Strict score parsing and Redis-style score formatting
+Context: Double.parseDouble accepts NaN, hex floats and suffixes (1.5f); NaN breaks ordering; -0.0 and 0.0 are
+equal for Redis but not for Double.compare; Double.toString prints 1.0 and 1.0E10.
+Decision: Validate scores with a decimal regex plus inf/-inf and reject overflow, normalize -0.0 to 0.0, and
+print scores with BigDecimal.valueOf(d).stripTrailingZeros().toPlainString().
+Consequence: Scores can never be NaN, ordering is total, and replies match redis-cli expectations.

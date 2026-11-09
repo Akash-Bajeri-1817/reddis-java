@@ -17,6 +17,7 @@ import com.reddis.command.TypeCommand;
 import com.reddis.server.Server;
 import com.reddis.storage.DataStore;
 import com.reddis.storage.ExpiryPurger;
+import com.reddis.command.SortedSetCommands;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
@@ -54,6 +55,7 @@ public class Main {
         ListCommands.register(router, store);
         HashCommands.register(router, store);
         SetTypeCommands.register(router, store);
+        SortedSetCommands.register(router, store);
 
         ExpiryPurger purger = new ExpiryPurger(store, PURGE_INTERVAL_MILLIS);
         purger.start();
