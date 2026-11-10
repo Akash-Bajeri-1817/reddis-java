@@ -140,3 +140,27 @@ Context: Expiry purging used a separate thread that touched the shared store.
 Decision: The loop's select timeout drives a periodic task (every 100 ms) that calls DataStore.purgeExpired().
 Consequence: No extra thread or locking for expiry, the same model as Redis's serverCron. A long purge would delay I/O,
 so purgeExpired must stay cheap (it only touches keys that are due).
+
+### ADR-18: Snapshot by capture-on-the-loop, write-in-the-background (no fork)
+Context: Redis snapshots with fork() and copy-on-write. The JVM cannot fork, and the store's collections may only
+be read by the thread that runs commands.
+Decision: The event-loop thread serializes the whole dataset to a byte[] (a consistent point-in-time copy); a
+background thread writes it with temp file + fsync + atomic rename + directory fsync. SAVE does both steps on the
+loop. The file has a magic header, version and CRC32 and is loaded defensively (lengths bounded by file size).
+Consequence: Snapshots are consistent and a crash mid-save never damages the previous snapshot. The loop pauses for
+the serialization (O(dataset)) and extra memory is needed for the byte[] (a fork-based design pays page copies instead).
+
+### ADR-19: AOF logs successful writes, with absolute deadlines, flushed before replies
+Context: Replaying a log must reproduce the data, but relative timeouts depend on when they run, and the durability
+promise depends on when the data reaches the disk.
+Decision: After each command, CommandPropagator turns it into zero or more log records: reads and failed commands
+are skipped, SET ... EX/PX and EXPIRE are rewritten to PEXPIREAT (or DEL). Records are buffered and written once per
+processed batch, BEFORE replies are sent (Persistence.beforeReplies), with fsync policy always, everysec (background
+thread) or no. Recovery truncates a torn tail and refuses to start on mid-file corruption.
+Consequence: With always, an acknowledged write is durable, and group commit amortizes the fsync over a pipeline.
+Replay is deterministic. The log grows until REWRITEAOF, which is synchronous here (Redis does it in a child process).
+
+### ADR-20: Observer hooks keep the server unaware of persistence
+Decision: EventLoopServer exposes CommandHooks (afterCommand, beforeReplies); Persistence implements it and is also
+driven by the loop's periodic task. Persistence only runs with the event-loop server.
+Consequence: The network layer has no file I/O; persistence can be tested without sockets (PersistenceHarness).
