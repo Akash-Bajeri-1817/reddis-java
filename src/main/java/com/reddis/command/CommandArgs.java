@@ -12,7 +12,7 @@ import java.util.OptionalLong;
 import java.util.regex.Pattern;
 
 /** Small helpers shared by commands. */
-final class CommandArgs {
+public final class CommandArgs {
 
     static final RespValue NOT_AN_INTEGER = new RespValue.RespError("ERR value is not an integer or out of range");
     static final RespValue NOT_A_FLOAT = new RespValue.RespError("ERR value is not a valid float");
@@ -53,7 +53,7 @@ final class CommandArgs {
     }
 
     /** Prints a score like Redis: 1 (not 1.0), 2.5, -3, 100 (not 1.0E2), inf, -inf. */
-    static String formatScore(double score) {
+    public static String formatScore(double score) {
         if (score == Double.POSITIVE_INFINITY) {
             return "inf";
         }

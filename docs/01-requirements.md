@@ -34,7 +34,7 @@ data structures and persistence internals.
 | FR-7 | Server shall support EXPIRE, PEXPIRE, TTL, PTTL, PERSIST and SET with EX/PX | 4 |
 | FR-8a | Server shall support list, hash and set commands, the TYPE command and WRONGTYPE errors | 5A |
 | FR-8b | Server shall support sorted-set commands | 5B |
-| FR-9 | Server shall persist data and recover it after restart | 7 |
+| FR-9 | Server shall persist data (RDB snapshots via SAVE/BGSAVE and an append-only file with always/everysec/no fsync) and recover it after restart | 7 |
 | FR-10 | Server shall evict keys when memory limit is reached | 8 |
 | FR-11 | Server shall support PUBLISH/SUBSCRIBE and MULTI/EXEC <br/>| 9 |
 | FR-12 | Server shall correctly handle partial reads, partial writes and pipelined commands | 6 |
@@ -48,6 +48,7 @@ data structures and persistence internals.
 | NFR-4 | Reliability: malformed input must never crash the server |
 | NFR-5 | Maintainability: modular code, 70%+ unit test coverage on core logic |
 | NFR-6 | Zero external runtime dependencies (JDK only; JUnit for tests) |
+| NFR-7 | A crash during a save or rewrite must never destroy previously persisted data | 7 |
 
 ## 5. Assumptions and Constraints
 - Java 21, Maven build

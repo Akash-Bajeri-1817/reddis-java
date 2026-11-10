@@ -29,6 +29,7 @@ public class EventLoopServer {
     private final CommandRouter router;
     private final Runnable periodicTask;
     private final long periodMillis;
+    private final CommandHooks hooks; // NEW
     private final RespDecoder decoder = new RespDecoder();
 
     private volatile boolean running;
@@ -36,15 +37,22 @@ public class EventLoopServer {
     private ServerSocketChannel serverChannel;
     private Thread loopThread;
 
+    public EventLoopServer(int port, CommandRouter router, Runnable periodicTask, long periodMillis) {
+        this(port, router, periodicTask, periodMillis, CommandHooks.NONE);
+    }
+
     /**
      * @param port         0 means "any free port" (see getPort())
-     * @param periodicTask runs on the event-loop thread every periodMillis (we use it to purge expired keys)
+     * @param periodicTask runs on the event-loop thread every periodMillis (expiry purge, autosave, ...)
+     * @param hooks        observer called after each command and before each batch of replies is sent
      */
-    public EventLoopServer(int port, CommandRouter router, Runnable periodicTask, long periodMillis) {
+    public EventLoopServer(int port, CommandRouter router, Runnable periodicTask, long periodMillis,
+                           CommandHooks hooks) { // NEW
         this.port = port;
         this.router = router;
         this.periodicTask = periodicTask;
         this.periodMillis = periodMillis;
+        this.hooks = hooks;
     }
 
     /** Binds the port and starts the loop thread, then returns. */
@@ -140,7 +148,7 @@ public class EventLoopServer {
                 onWritable(connection);
             }
         } catch (IOException | CancelledKeyException e) {
-            close(connection); // reset by peer, output limit exceeded, ...: only this client is affected
+            close(connection); // reset by peer, output limit exceeded, disk error in a hook, ...
         } catch (RuntimeException e) {
             System.err.println("Unexpected error, closing connection: " + e);
             close(connection);
@@ -175,6 +183,7 @@ public class EventLoopServer {
             c.closeAfterFlush = true;    // the client closed its side: finish sending what we owe it, then close
         } else {
             process(c);
+            hooks.beforeReplies();       // NEW: make writes durable BEFORE telling the client they succeeded
         }
         finishEvent(c);
     }
@@ -186,7 +195,9 @@ public class EventLoopServer {
             List<byte[]> command;
             while ((command = decoder.decode(c.in)) != null) { // null = incomplete: wait for more bytes
                 if (!command.isEmpty()) {
-                    c.writer.write(execute(command));
+                    RespValue reply = execute(command);
+                    hooks.afterCommand(command, reply); // NEW: e.g. append to the AOF
+                    c.writer.write(reply);
                 }
             }
         } catch (ProtocolException e) {
