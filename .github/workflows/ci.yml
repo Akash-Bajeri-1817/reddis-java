@@ -1,0 +1,71 @@
+name: Reddis CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # CI: Verifies code compilation, runs unit tests, and tests live socket interaction
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Compile and Run Test Suite
+        run: mvn clean verify
+
+      - name: Live Smoke Test with redis-tools
+        run: |
+          # 1. Install native redis-tools on the runner
+          sudo apt-get update && sudo apt-get install -y redis-tools
+          
+          # 2. Start Reddis daemon in the background
+          java -cp target/classes com.reddis.Main &
+          SERVER_PID=$!
+          sleep 2
+          
+          # 3. Verify server responds over TCP
+          redis-cli -p 6379 PING
+          redis-cli -p 6379 ECHO "CI-Network-Check-Passed"
+          
+          # 4. Clean up the process
+          kill -9 $SERVER_PID
+
+  # CD: Runs only when pushing a semantic tag (e.g., git push origin v0.7.0)
+  publish-release:
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Package Standalone JAR
+        run: mvn clean package -DskipTests
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/*.jar
+          generate_release_notes: true
