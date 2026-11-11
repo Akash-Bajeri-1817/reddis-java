@@ -24,7 +24,7 @@ public final class CommandArgs {
     private CommandArgs() { }
 
     /** Parses a decimal integer argument; empty if it is not one (or does not fit in a long). */
-    static OptionalLong parseLong(byte[] arg) {
+    public static OptionalLong parseLong(byte[] arg) {
         try {
             return OptionalLong.of(Long.parseLong(new String(arg, StandardCharsets.US_ASCII)));
         } catch (NumberFormatException e) {
@@ -36,7 +36,7 @@ public final class CommandArgs {
      * Parses a sorted-set score: a decimal number, "inf", "+inf" or "-inf" (case-insensitive).
      * Rejects NaN, hex floats, suffixes such as "1.5f" (all accepted by Double.parseDouble) and overflow.
      */
-    static OptionalDouble parseScore(byte[] arg) {
+    public static OptionalDouble parseScore(byte[] arg) {
         String text = new String(arg, StandardCharsets.US_ASCII);
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.equals("inf") || lower.equals("+inf")) {
@@ -64,30 +64,30 @@ public final class CommandArgs {
     }
 
     /** Keyword arguments such as EX/PX/WITHSCORES are case-insensitive. */
-    static String keyword(byte[] arg) {
+    public static String keyword(byte[] arg) {
         return new String(arg, StandardCharsets.US_ASCII).toUpperCase(Locale.ROOT);
     }
 
-    static RespValue wrongArgs(String commandName) {
+    public static RespValue wrongArgs(String commandName) {
         return new RespValue.RespError("ERR wrong number of arguments for '" + commandName + "' command");
     }
 
-    static RespValue invalidExpire(String commandName) {
+    public static RespValue invalidExpire(String commandName) {
         return new RespValue.RespError("ERR invalid expire time in '" + commandName + "' command");
     }
 
     /** A bulk string, or the null bulk string when the value is null. */
-    static RespValue bulkOrNull(byte[] value) {
+    public static RespValue bulkOrNull(byte[] value) {
         return value == null ? RespValue.BulkString.NULL : new RespValue.BulkString(value);
     }
 
     /** A bulk string holding the text (UTF-8). */
-    static RespValue bulk(String text) {
+    public static RespValue bulk(String text) {
         return new RespValue.BulkString(text.getBytes(StandardCharsets.UTF_8));
     }
 
     /** A RESP array whose elements are bulk strings. */
-    static RespValue bulkArray(List<byte[]> items) {
+    public static RespValue bulkArray(List<byte[]> items) {
         List<RespValue> elements = new ArrayList<>(items.size());
         for (byte[] item : items) {
             elements.add(new RespValue.BulkString(item));
