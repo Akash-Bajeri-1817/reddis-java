@@ -8,13 +8,14 @@ import java.util.Map;
 /**
  * A Redis sorted set: unique members, each with a score, ordered by (score, member bytes).
  * Combines a hash map (member -> score, O(1) lookups) with a skip list (ordering and rank, O(log n)),
- * exactly like Redis. Both are always updated together.
+ * exactly like Redis. Both are always updated together. Keeps a running estimate of its memory use.
  * NOT thread-safe: only use it inside DataStore.access().
  */
 public final class SortedSetValue implements RedisValue {
 
     private final Map<ByteArrayKey, Double> scores = new HashMap<>();
     private final SkipList ordered = new SkipList();
+    private long bytes = MemoryModel.ZSET_BASE;
 
     /**
      * Adds the member, or updates its score if it already exists.
@@ -30,6 +31,7 @@ public final class SortedSetValue implements RedisValue {
         if (old == null) {
             ordered.insert(score, member);
             scores.put(key, score);
+            bytes += MemoryModel.ZSET_ENTRY + MemoryModel.bytes(member);
             return true;
         }
         if (old != score) {
@@ -47,6 +49,7 @@ public final class SortedSetValue implements RedisValue {
             return false;
         }
         ordered.delete(old, member);
+        bytes -= MemoryModel.ZSET_ENTRY + MemoryModel.bytes(member);
         return true;
     }
 
@@ -102,5 +105,19 @@ public final class SortedSetValue implements RedisValue {
     @Override
     public boolean isEmpty() {
         return scores.isEmpty();
+    }
+
+    @Override
+    public long estimatedBytes() {
+        return bytes;
+    }
+
+    /** Recomputes the estimate from scratch (O(n)); the running total must always equal it. */
+    long recountBytes() {
+        long total = MemoryModel.ZSET_BASE;
+        for (ByteArrayKey member : scores.keySet()) {
+            total += MemoryModel.ZSET_ENTRY + MemoryModel.bytes(member.bytes());
+        }
+        return total;
     }
 }

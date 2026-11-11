@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.io.UncheckedIOException;
 
 /**
  * Ties snapshots and the append-only file together and plugs into the event loop as CommandHooks.
@@ -107,6 +108,21 @@ public final class Persistence implements CommandHooks {
     public void beforeReplies() throws IOException {
         if (aof != null) {
             aof.flush();
+        }
+    }
+
+    /**
+     * Called when the memory guard evicts a key. The eviction must be logged as DEL: otherwise replaying the log
+     * after a restart would bring the evicted key back and exceed the memory limit again.
+     */
+    public void recordEviction(byte[] key) {
+        dirty.incrementAndGet();
+        if (aof != null) {
+            try {
+                aof.append(List.of(AofFormat.ascii("DEL"), key));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e); // cannot happen: the record is only encoded into memory here
+            }
         }
     }
 

@@ -12,4 +12,9 @@ public record StringValue(byte[] bytes) implements RedisValue {
     public boolean isEmpty() {
         return false;
     }
+
+    @Override
+    public long estimatedBytes() {
+        return MemoryModel.STRING_OBJECT + MemoryModel.bytes(bytes);
+    }
 }

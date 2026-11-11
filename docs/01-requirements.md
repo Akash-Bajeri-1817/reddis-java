@@ -35,7 +35,7 @@ data structures and persistence internals.
 | FR-8a | Server shall support list, hash and set commands, the TYPE command and WRONGTYPE errors | 5A |
 | FR-8b | Server shall support sorted-set commands | 5B |
 | FR-9 | Server shall persist data (RDB snapshots via SAVE/BGSAVE and an append-only file with always/everysec/no fsync) and recover it after restart | 7 |
-| FR-10 | Server shall evict keys when memory limit is reached | 8 |
+| FR-10 | Server shall enforce a configurable maxmemory limit and evict keys according to a policy (noeviction, allkeys-lru/lfu/random, volatile-lru/lfu/random/ttl) using approximated LRU/LFU by sampling | 8 |
 | FR-11 | Server shall support PUBLISH/SUBSCRIBE and MULTI/EXEC <br/>| 9 |
 | FR-12 | Server shall correctly handle partial reads, partial writes and pipelined commands | 6 |
 
@@ -49,6 +49,7 @@ data structures and persistence internals.
 | NFR-5 | Maintainability: modular code, 70%+ unit test coverage on core logic |
 | NFR-6 | Zero external runtime dependencies (JDK only; JUnit for tests) |
 | NFR-7 | A crash during a save or rewrite must never destroy previously persisted data | 7 |
+| NFR-8 | Memory accounting must stay exact relative to its model: the incremental counter always equals a full recount | 8 |
 
 ## 5. Assumptions and Constraints
 - Java 21, Maven build

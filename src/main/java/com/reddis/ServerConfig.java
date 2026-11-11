@@ -1,20 +1,26 @@
 package com.reddis;
 
+import com.reddis.eviction.EvictionPolicy;
+import com.reddis.eviction.MemoryConfig;
 import com.reddis.persistence.FsyncPolicy;
 import com.reddis.persistence.PersistenceConfig;
 
 import java.nio.file.Path;
 
 /** Command-line configuration. */
-public record ServerConfig(int port, boolean blocking, PersistenceConfig persistence) {
+public record ServerConfig(int port, boolean blocking, PersistenceConfig persistence, MemoryConfig memory) {
 
     public static final String USAGE = """
             Usage: Main [port] [options]
-              --blocking                    legacy thread-per-client server (no persistence)
-              --dir <path>                  directory for dump.rdb and appendonly.aof (default: data)
-              --appendonly yes|no           enable the append-only file (default: no)
+              --blocking                         legacy thread-per-client server (no persistence, no maxmemory)
+              --dir <path>                       directory for dump.rdb and appendonly.aof (default: data)
+              --appendonly yes|no                enable the append-only file (default: no)
               --appendfsync always|everysec|no   AOF fsync policy (default: everysec)
-              --save-interval <seconds>     automatic background snapshot if data changed (default: 0 = off)""";
+              --save-interval <seconds>          automatic background snapshot if data changed (default: 0 = off)
+              --maxmemory <size>                 memory limit, e.g. 100mb (default: 0 = unlimited)
+              --maxmemory-policy <policy>        noeviction | allkeys-lru | volatile-lru | allkeys-lfu | volatile-lfu
+                                                 | allkeys-random | volatile-random | volatile-ttl (default: noeviction)
+              --maxmemory-samples <n>            keys sampled per eviction (default: 5)""";
 
     public static ServerConfig parse(String... args) {
         int port = 6379;
@@ -23,6 +29,9 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
         boolean appendOnly = false;
         FsyncPolicy fsync = FsyncPolicy.EVERYSEC;
         long saveInterval = 0;
+        long maxMemory = 0;
+        EvictionPolicy policy = EvictionPolicy.NOEVICTION;
+        int samples = 5;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -44,6 +53,18 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
                     saveInterval = Long.parseLong(valueAfter(args, i));
                     i++;
                 }
+                case "--maxmemory" -> {
+                    maxMemory = MemoryConfig.parseBytes(valueAfter(args, i));
+                    i++;
+                }
+                case "--maxmemory-policy" -> {
+                    policy = EvictionPolicy.parse(valueAfter(args, i));
+                    i++;
+                }
+                case "--maxmemory-samples" -> {
+                    samples = Integer.parseInt(valueAfter(args, i));
+                    i++;
+                }
                 default -> {
                     if (arg.startsWith("--")) {
                         throw new IllegalArgumentException("Unknown option: " + arg);
@@ -52,7 +73,9 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
                 }
             }
         }
-        return new ServerConfig(port, blocking, new PersistenceConfig(dir, appendOnly, fsync, saveInterval));
+        return new ServerConfig(port, blocking,
+                new PersistenceConfig(dir, appendOnly, fsync, saveInterval),
+                new MemoryConfig(maxMemory, policy, samples));
     }
 
     private static String valueAfter(String[] args, int optionIndex) {
