@@ -25,3 +25,37 @@
 ### 3. Resource Utilization
 * Single-threaded execution pinned a single CPU core near 100% capacity during high pipelined throughput (`-P 16`).
 * Memory utilization remained consistent due to binary-safe buffer operations and reusing direct byte buffers for command execution without unnecessary Java `String` allocations.
+## Eviction hit rates (10 000 keys, cache of 1 000, Zipf s=1.0, 300 000 requests)
+
+| Policy | Hit rate |
+|--------|----------|
+| exact LRU (LinkedHashMap) | 0.6753|
+| allkeys-lru, 1 sample | 0.6311|
+| allkeys-lru, 5 samples | 0.6703|
+| allkeys-lru, 10 samples | 0.6735|
+| allkeys-lfu, 5 samples | 0.7126|
+| allkeys-lfu, 10 samples | 0.7277|
+| allkeys-random | 0.6314|
+
+### Key Conclusions
+
+1. **Sampled LRU Closely Approximates True LRU at $O(1)$ Memory Overhead**
+* Exact LRU requires maintaining two pointers per entry (a doubly-linked list) and updating node positions on every read and write, introducing noticeable RAM overhead and lock contention.
+* Taking just 5 random candidates and evicting the oldest achieves a **67.03%** hit rate, within **0.50%** of theoretical exact LRU (67.53%).
+* Increasing to 10 samples (67.35%) narrows the gap to **0.18%**, validating why Redis avoids linked-list pointer overhead in favor of sampled approximation.
+
+
+2. **$N=1$ Sampling is Mathematically Equivalent to Random Eviction**
+* Sampling a single candidate ($N=1$) yielded a **63.11%** hit rate, matching pure random eviction (**63.14%**).
+* This confirms the sampling pool mechanics function as expected and establishes the lower-bound baseline efficiency under this access pattern.
+
+
+3. **LFU Outperforms LRU Under Skewed Access Distributions**
+* Sampled LFU with 10 samples achieved **72.77%**, outperforming exact LRU (67.53%) by more than **5.2 percentage points**.
+* Under non-uniform (Zipfian/Power-Law) access distributions, LRU suffers from cache pollution when cold keys receive transient spikes. LFU protects high-frequency hot keys using frequency tracking rather than relying solely on access timestamps.
+
+
+4. **Diminishing Returns Beyond 5 to 10 Samples**
+* Scaling from 1 sample to 5 samples yields a **+3.92%** improvement for LRU.
+* Scaling from 5 to 10 samples only yields a marginal gain (**+0.32%** for LRU, **+1.51%** for LFU), but doubles the CPU cycles spent sampling candidate keys during evictions.
+* This demonstrates why Redis defaults to `maxmemory-samples 5`: it represents the optimal balance between hit rate and CPU overhead.

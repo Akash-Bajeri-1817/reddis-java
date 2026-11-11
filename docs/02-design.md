@@ -164,3 +164,33 @@ Replay is deterministic. The log grows until REWRITEAOF, which is synchronous he
 Decision: EventLoopServer exposes CommandHooks (afterCommand, beforeReplies); Persistence implements it and is also
 driven by the loop's periodic task. Persistence only runs with the event-loop server.
 Consequence: The network layer has no file I/O; persistence can be tested without sockets (PersistenceHarness).
+
+### ADR-21: Estimated memory with exact incremental accounting
+Context: Java has no cheap exact per-object size and Runtime heap figures lag behind the garbage collector; eviction
+needs an up-to-date number on every write.
+Decision: A documented memory model (MemoryModel) gives each key and value an estimated size; every value type keeps a
+running total of its own contents and DataStore keeps one counter for all entries, adjusted by the DIFFERENCE on every
+change through a single bookkeeping method (track). DataStore.validate() recounts everything and a randomized test calls
+it, so accounting bugs cannot hide.
+Consequence: usedMemory is O(1) and exactly consistent with the model; it approximates, but does not equal, real heap use
+(MemoryModelDemo compares the two).
+
+### ADR-22: Approximated LRU/LFU by sampling, using a random-access key index
+Context: Exact LRU needs a linked list over all keys updated on every read. Redis instead samples a few keys and evicts
+the best candidate.
+Decision: Each entry carries a last-access time and an 8-bit logarithmic LFU counter with minute-based decay. DataStore
+maintains two RandomKeySets (ArrayList + position map, swap-with-last removal) of all keys and of keys with a deadline,
+so sampling is O(samples) and volatile-* policies sample only evictable keys. MemoryGuard evicts the best-scoring of
+maxmemory-samples random keys, repeating until memory fits.
+Consequence: Eviction cost is independent of the number of keys and reads write only to the entry they touch. The choice is
+approximate (the simulation quantifies how close it comes to exact LRU); an eviction pool could improve it further.
+
+### ADR-23: Eviction as a router guard; evictions are logged; policies as an enum strategy
+Context: Eviction must run before any command that can grow memory, must not be duplicated in every command, and must
+survive restarts.
+Decision: CommandRouter consults an optional CommandGuard before executing a command; MemoryGuard implements it for the
+growing commands and returns -OOM when nothing can be evicted. Real evictions are reported to Persistence, which appends DEL
+to the AOF; expired keys reclaimed on the way are not counted or logged (absolute deadlines make replay expire them). Each
+policy is an enum constant that overrides score() (Strategy pattern). The guard is installed after the data is loaded.
+Consequence: Commands stay unaware of memory limits; a restart reproduces the post-eviction dataset; one command may overshoot
+the limit by its own size and at most 100 000 evictions run per command.
