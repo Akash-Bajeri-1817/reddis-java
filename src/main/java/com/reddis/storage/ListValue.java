@@ -6,28 +6,39 @@ import java.util.List;
 
 /**
  * A Redis list on top of ArrayDeque (circular array: O(1) at both ends).
- * NOT thread-safe: only use it inside DataStore.access().
+ * Keeps a running estimate of its memory use. NOT thread-safe: only use it inside DataStore.access().
  */
 public final class ListValue implements RedisValue {
 
     private final ArrayDeque<byte[]> items = new ArrayDeque<>();
+    private long bytes = MemoryModel.LIST_BASE;
 
     public void pushLeft(byte[] value) {
         items.addFirst(value);
+        bytes += cost(value);
     }
 
     public void pushRight(byte[] value) {
         items.addLast(value);
+        bytes += cost(value);
     }
 
     /** @return the removed element, or null if the list is empty */
     public byte[] popLeft() {
-        return items.pollFirst();
+        byte[] value = items.pollFirst();
+        if (value != null) {
+            bytes -= cost(value);
+        }
+        return value;
     }
 
     /** @return the removed element, or null if the list is empty */
     public byte[] popRight() {
-        return items.pollLast();
+        byte[] value = items.pollLast();
+        if (value != null) {
+            bytes -= cost(value);
+        }
+        return value;
     }
 
     public int size() {
@@ -83,6 +94,10 @@ public final class ListValue implements RedisValue {
         return result;
     }
 
+    private static long cost(byte[] value) {
+        return MemoryModel.LIST_ELEMENT + MemoryModel.bytes(value);
+    }
+
     @Override
     public String typeName() {
         return "list";
@@ -91,5 +106,19 @@ public final class ListValue implements RedisValue {
     @Override
     public boolean isEmpty() {
         return items.isEmpty();
+    }
+
+    @Override
+    public long estimatedBytes() {
+        return bytes;
+    }
+
+    /** Recomputes the estimate from scratch (O(n)); the running total must always equal it. */
+    long recountBytes() {
+        long total = MemoryModel.LIST_BASE;
+        for (byte[] item : items) {
+            total += cost(item);
+        }
+        return total;
     }
 }
