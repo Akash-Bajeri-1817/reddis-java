@@ -28,10 +28,16 @@ final class TestClient implements AutoCloseable {
 
     /**
      * Sends one command and returns the reply:
-     * "+OK" -> "OK", ":1" -> "1", "$5 hello" -> "hello", null bulk -> "(nil)", errors -> the raw line,
-     * arrays -> "[a,b,c]".
+     * "+OK" -> "OK", ":1" -> "1", "$5 hello" -> "hello", null bulk or null array -> "(nil)",
+     * errors -> the raw line, arrays -> "[a,b,c]".
      */
     String send(String... parts) throws IOException {
+        write(parts);
+        return readReply();
+    }
+
+    /** Sends a command WITHOUT reading anything back. */
+    void write(String... parts) throws IOException {
         StringBuilder command = new StringBuilder("*").append(parts.length).append("\r\n");
         for (String part : parts) {
             int length = part.getBytes(StandardCharsets.UTF_8).length;
@@ -39,6 +45,10 @@ final class TestClient implements AutoCloseable {
         }
         out.write(command.toString().getBytes(StandardCharsets.UTF_8));
         out.flush();
+    }
+
+    /** Reads the next reply from the server: the answer to a command, or a message pushed to a subscriber. */
+    String receive() throws IOException {
         return readReply();
     }
 
