@@ -36,7 +36,7 @@ data structures and persistence internals.
 | FR-8b | Server shall support sorted-set commands | 5B |
 | FR-9 | Server shall persist data (RDB snapshots via SAVE/BGSAVE and an append-only file with always/everysec/no fsync) and recover it after restart | 7 |
 | FR-10 | Server shall enforce a configurable maxmemory limit and evict keys according to a policy (noeviction, allkeys-lru/lfu/random, volatile-lru/lfu/random/ttl) using approximated LRU/LFU by sampling | 8 |
-| FR-11 | Server shall support PUBLISH/SUBSCRIBE and MULTI/EXEC <br/>| 9 |
+| FR-11 | Server shall support PUBLISH/SUBSCRIBE (channels and glob patterns) and MULTI/EXEC/DISCARD/WATCH/UNWATCH transactions | 9 |
 | FR-12 | Server shall correctly handle partial reads, partial writes and pipelined commands | 6 |
 
 ## 4. Non-Functional Requirements
