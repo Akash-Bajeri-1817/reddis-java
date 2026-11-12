@@ -11,12 +11,12 @@ import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.regex.Pattern;
 
-/** Small helpers shared by commands. */
+/** Small helpers shared by command implementations (in this and other packages). */
 public final class CommandArgs {
 
-    static final RespValue NOT_AN_INTEGER = new RespValue.RespError("ERR value is not an integer or out of range");
-    static final RespValue NOT_A_FLOAT = new RespValue.RespError("ERR value is not a valid float");
-    static final RespValue SYNTAX_ERROR = new RespValue.RespError("ERR syntax error");
+    public static final RespValue NOT_AN_INTEGER = new RespValue.RespError("ERR value is not an integer or out of range");
+    public static final RespValue NOT_A_FLOAT = new RespValue.RespError("ERR value is not a valid float");
+    public static final RespValue SYNTAX_ERROR = new RespValue.RespError("ERR syntax error");
 
     /** Plain decimal numbers with optional sign and exponent. Stricter than Double.parseDouble on purpose. */
     private static final Pattern DECIMAL = Pattern.compile("[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?");

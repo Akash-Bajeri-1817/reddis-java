@@ -46,6 +46,10 @@ public class RespWriter {
     }
 
     private void writeArray(RespArray array) throws IOException {
+        if (array.isNull()) {
+            writeLine('*', "-1");
+            return;
+        }
         writeLine('*', Integer.toString(array.elements().size()));
         for (RespValue element : array.elements()) {
             write(element);

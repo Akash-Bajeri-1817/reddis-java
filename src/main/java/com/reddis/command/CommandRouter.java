@@ -19,6 +19,11 @@ public class CommandRouter {
         commands.put(name.toUpperCase(Locale.ROOT), command);
     }
 
+    /** @param upperCaseName the command name in upper case */
+    public boolean isRegistered(String upperCaseName) {
+        return commands.containsKey(upperCaseName);
+    }
+
     /** Installs a check that runs before every known command (see MemoryGuard). */
     public void setGuard(CommandGuard guard) {
         this.guard = guard;

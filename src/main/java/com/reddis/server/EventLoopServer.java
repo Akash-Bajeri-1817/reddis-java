@@ -4,6 +4,10 @@ import com.reddis.command.CommandRouter;
 import com.reddis.protocol.ProtocolException;
 import com.reddis.protocol.RespDecoder;
 import com.reddis.protocol.RespValue;
+import com.reddis.session.Dispatcher;
+import com.reddis.session.PubSubBroker;
+import com.reddis.session.Session;
+import com.reddis.session.WatchRegistry;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -15,22 +19,27 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
  * A single-threaded, non-blocking server: ONE thread accepts connections, reads, executes every command
  * and writes replies (the same model as Redis). Because only this thread runs commands, each command,
- * including multi-key ones, is atomic.
+ * every MULTI/EXEC block and every PUBLISH is atomic with respect to other clients.
  */
 public class EventLoopServer {
 
     private final int port;
-    private final CommandRouter router;
+    private final Dispatcher dispatcher;
     private final Runnable periodicTask;
     private final long periodMillis;
-    private final CommandHooks hooks; // NEW
+    private final CommandHooks hooks;
     private final RespDecoder decoder = new RespDecoder();
+
+    /** Connections that were handed pushed messages (pub/sub) during this event and must be flushed. */
+    private final Set<Connection> pendingFlush = new LinkedHashSet<>();
 
     private volatile boolean running;
     private Selector selector;
@@ -41,15 +50,24 @@ public class EventLoopServer {
         this(port, router, periodicTask, periodMillis, CommandHooks.NONE);
     }
 
+    /** A server with its own (empty) pub/sub broker and watch registry. */
+    public EventLoopServer(int port, CommandRouter router, Runnable periodicTask, long periodMillis,
+                           CommandHooks hooks) {
+        this(port, new Dispatcher(router, new PubSubBroker(), new WatchRegistry(), hooks::afterCommand),
+                periodicTask, periodMillis, hooks);
+    }
+
     /**
      * @param port         0 means "any free port" (see getPort())
+     * @param dispatcher   runs every command (and owns pub/sub, transactions and watches)
      * @param periodicTask runs on the event-loop thread every periodMillis (expiry purge, autosave, ...)
-     * @param hooks        observer called after each command and before each batch of replies is sent
+     * @param hooks        told right before each batch of replies is sent (the AOF flush); the per-command
+     *                     observation happens inside the dispatcher
      */
-    public EventLoopServer(int port, CommandRouter router, Runnable periodicTask, long periodMillis,
-                           CommandHooks hooks) { // NEW
+    public EventLoopServer(int port, Dispatcher dispatcher, Runnable periodicTask, long periodMillis,
+                           CommandHooks hooks) {
         this.port = port;
-        this.router = router;
+        this.dispatcher = dispatcher;
         this.periodicTask = periodicTask;
         this.periodMillis = periodMillis;
         this.hooks = hooks;
@@ -116,6 +134,7 @@ public class EventLoopServer {
                     SelectionKey key = ready.next();
                     ready.remove(); // the selector never clears this set itself: forgetting this re-handles keys forever
                     dispatch(key);
+                    flushPendingPushes(); // subscribers that got a message during this event
                 }
 
                 if (System.nanoTime() - nextRun >= 0) {
@@ -165,6 +184,7 @@ public class EventLoopServer {
                     channel.configureBlocking(false);
                     channel.setOption(StandardSocketOptions.TCP_NODELAY, true);
                     Connection connection = new Connection(channel);
+                    connection.session = new Session(message -> push(connection, message));
                     connection.key = channel.register(selector, SelectionKey.OP_READ, connection);
                 } catch (IOException e) {
                     closeQuietly(channel);
@@ -183,7 +203,7 @@ public class EventLoopServer {
             c.closeAfterFlush = true;    // the client closed its side: finish sending what we owe it, then close
         } else {
             process(c);
-            hooks.beforeReplies();       // NEW: make writes durable BEFORE telling the client they succeeded
+            hooks.beforeReplies();       // make writes durable BEFORE telling the client they succeeded
         }
         finishEvent(c);
     }
@@ -195,9 +215,7 @@ public class EventLoopServer {
             List<byte[]> command;
             while ((command = decoder.decode(c.in)) != null) { // null = incomplete: wait for more bytes
                 if (!command.isEmpty()) {
-                    RespValue reply = execute(command);
-                    hooks.afterCommand(command, reply); // NEW: e.g. append to the AOF
-                    c.writer.write(reply);
+                    dispatcher.dispatch(c.session, command, c.replies);
                 }
             }
         } catch (ProtocolException e) {
@@ -215,13 +233,37 @@ public class EventLoopServer {
         }
     }
 
-    /** A bug in one command must never stop the loop that serves every client. */
-    private RespValue execute(List<byte[]> command) {
+    // ------------------------------------------------------------------ push
+
+    /**
+     * Pub/sub delivery: append a message to ANOTHER client's output buffer. We cannot flush it right here (we are in
+     * the middle of the publisher's command), so the target is queued for flushPendingPushes().
+     */
+    private void push(Connection target, RespValue message) {
         try {
-            return router.route(command);
-        } catch (RuntimeException e) {
-            System.err.println("Command failed: " + e);
-            return new RespValue.RespError("ERR internal error");
+            target.writer.write(message);
+            pendingFlush.add(target);
+        } catch (IOException e) {
+            close(target); // a subscriber too slow to keep up (its buffer hit the limit) is dropped, like Redis does
+        }
+    }
+
+    private void flushPendingPushes() {
+        if (pendingFlush.isEmpty()) {
+            return;
+        }
+        List<Connection> batch = new ArrayList<>(pendingFlush);
+        pendingFlush.clear();
+        for (Connection c : batch) {
+            if (!c.key.isValid()) {
+                continue;
+            }
+            try {
+                flush(c);
+                updateInterest(c); // registers OP_WRITE if the socket could not take everything
+            } catch (IOException | CancelledKeyException e) {
+                close(c);
+            }
         }
     }
 
@@ -276,6 +318,8 @@ public class EventLoopServer {
     }
 
     private void close(Connection c) {
+        pendingFlush.remove(c);
+        dispatcher.sessionClosed(c.session); // drop its subscriptions, watches and half-built transaction
         c.key.cancel();
         closeQuietly(c.channel);
     }

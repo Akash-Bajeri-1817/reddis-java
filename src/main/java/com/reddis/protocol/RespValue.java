@@ -32,6 +32,13 @@ public sealed interface RespValue {
         }
     }
 
-    /** *2\r\n...elements... */
-    record RespArray(List<RespValue> elements) implements RespValue { }
+    /** *2\r\n...elements...  (*-1\r\n when elements is null) */
+    record RespArray(List<RespValue> elements) implements RespValue {
+        /** The null array: what EXEC returns when a WATCHed key was changed. */
+        public static final RespArray NULL = new RespArray(null);
+
+        public boolean isNull() {
+            return elements == null;
+        }
+    }
 }

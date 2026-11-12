@@ -9,6 +9,10 @@ import com.reddis.persistence.Persistence;
 import com.reddis.persistence.PersistenceConfig;
 import com.reddis.server.EventLoopServer;
 import com.reddis.server.Server;
+import com.reddis.session.Dispatcher;
+import com.reddis.session.PubSubBroker;
+import com.reddis.session.PublishCommand;
+import com.reddis.session.WatchRegistry;
 import com.reddis.storage.DataStore;
 import com.reddis.storage.ExpiryPurger;
 
@@ -48,18 +52,27 @@ public class Main {
         persistence.load(); // restore the dataset BEFORE accepting any client
         PersistenceCommands.register(router, persistence);
 
+        PubSubBroker broker = new PubSubBroker();
+        WatchRegistry watches = new WatchRegistry();
+        router.register("PUBLISH", new PublishCommand(broker));
+
         // Installed only AFTER the load: replaying a dataset must never trigger evictions.
-        MemoryGuard guard = new MemoryGuard(store, config.memory(), Clock.systemUTC(), new Random(),
-                persistence::recordEviction); // evictions are logged to the AOF as DEL
+        MemoryGuard guard = new MemoryGuard(store, config.memory(), Clock.systemUTC(), new Random(), key -> {
+            persistence.recordEviction(key); // logged to the AOF as DEL
+            watches.touch(key);              // an evicted key counts as modified for WATCH
+        });
         router.setGuard(guard);
         MemoryCommands.register(router, guard, store);
+
+        // The dispatcher runs every command; it tells the persistence layer about each executed command.
+        Dispatcher dispatcher = new Dispatcher(router, broker, watches, persistence::afterCommand);
 
         // Expiry purging and autosave run on the event-loop thread, between I/O events (like Redis's serverCron).
         Runnable cron = () -> {
             store.purgeExpired();
             persistence.cron();
         };
-        EventLoopServer server = new EventLoopServer(config.port(), router, cron, CRON_INTERVAL_MILLIS, persistence);
+        EventLoopServer server = new EventLoopServer(config.port(), dispatcher, cron, CRON_INTERVAL_MILLIS, persistence);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop();       // first: no more commands
@@ -71,7 +84,8 @@ public class Main {
     private static void runBlocking(ServerConfig config, CommandRouter router, DataStore store) throws IOException {
         PersistenceConfig persistence = config.persistence();
         if (persistence.appendOnly() || persistence.saveIntervalSeconds() > 0 || config.memory().maxMemoryBytes() > 0) {
-            System.err.println("Warning: persistence and maxmemory require the event-loop server; ignored with --blocking");
+            System.err.println("Warning: persistence, maxmemory, pub/sub and transactions require the event-loop "
+                    + "server; ignored with --blocking");
         }
         ExpiryPurger purger = new ExpiryPurger(store, CRON_INTERVAL_MILLIS);
         purger.start();

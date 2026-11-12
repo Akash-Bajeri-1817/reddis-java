@@ -194,3 +194,32 @@ to the AOF; expired keys reclaimed on the way are not counted or logged (absolut
 policy is an enum constant that overrides score() (Strategy pattern). The guard is installed after the data is loaded.
 Consequence: Commands stay unaware of memory limits; a restart reproduces the post-eviction dataset; one command may overshoot
 the limit by its own size and at most 100 000 evictions run per command.
+
+### ADR-25: Session layer: per-connection state lives in a Dispatcher in front of the router
+Context: SUBSCRIBE and MULTI change how later commands on the same connection behave, but commands were stateless
+functions of (arguments) -> reply.
+Decision: Each connection owns a Session (transaction queue, watched keys, subscriptions). A Dispatcher handles the
+session-aware commands and the subscriber/transaction modes, and hands every other command to the unchanged
+CommandRouter. The dispatcher reports each EXECUTED command to a CommandObserver (the AOF) and to the WatchRegistry.
+Consequence: No existing command had to change; transaction and pub/sub rules live in one class; the server layer only
+needs to supply a Session and a reply sink.
+
+### ADR-26: Pub/Sub delivery by appending to other connections' output buffers on the single loop thread
+Context: A PUBLISH must reach other clients' sockets, and slow subscribers must not block anyone.
+Decision: The broker maps channels and glob patterns to Sessions. PUBLISH decides the receivers first, then pushes a
+message to each Session's sink, which appends it to that connection's output buffer; the event loop flushes those
+connections after the current event and registers OP_WRITE if needed. A subscriber whose buffer reaches the 64 MB limit
+is closed, like Redis's pubsub client-output-buffer-limit. PUBLISH is an ordinary command so it can be queued in MULTI.
+Consequence: No locks anywhere; delivery order is deterministic; publishers are never blocked. Messages are not
+persisted or replayed (at-most-once).
+
+### ADR-27: Transactions without rollback; WATCH as conservative optimistic locking
+Context: MULTI/EXEC must be isolated from other clients, and WATCH must detect conflicting writes.
+Decision: Queued commands run back to back inside one event-loop turn, which is the isolation guarantee; an error in
+one command is returned in the result array and does not undo the others. A command that cannot be queued (unknown)
+makes EXEC answer -EXECABORT. WATCH registers (key -> sessions); every successful write command (and every eviction)
+marks the watchers dirty, and EXEC returns the null array if its session is dirty. EXEC unwatches before running.
+Each executed command is appended to the AOF individually.
+Consequence: Simple, fast and race-free on one thread. WATCH may abort when a write changed nothing, but never misses a
+conflict. A crash while a transaction's records are being appended could persist only part of it (a MULTI/EXEC wrapper in
+the AOF would fix this later). Arity errors surface at EXEC time instead of queue time.
