@@ -1,6 +1,8 @@
 package com.reddis.server;
 
 import com.reddis.protocol.RespWriter;
+import com.reddis.session.ReplySink;
+import com.reddis.session.Session;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -10,7 +12,8 @@ import java.nio.channels.SocketChannel;
 
 /**
  * Everything the event loop remembers about one client: its channel, a buffer of bytes received but not yet
- * decoded, and a buffer of reply bytes not yet sent. Only ever touched by the event-loop thread.
+ * decoded, a buffer of reply bytes not yet sent, and its Session (transaction, watches, subscriptions).
+ * Only ever touched by the event-loop thread.
  *
  * Both buffers are kept in WRITE mode between events (position = end of the data they hold).
  */
@@ -18,14 +21,16 @@ final class Connection {
 
     static final int INITIAL_BUFFER = 16 * 1024;
     static final int MAX_INPUT = 64 * 1024 * 1024;   // a single command (or unread backlog) may not exceed this
-    static final int MAX_OUTPUT = 64 * 1024 * 1024;  // unsent replies may not exceed this
+    static final int MAX_OUTPUT = 64 * 1024 * 1024;  // unsent replies/messages may not exceed this
     static final int OUTPUT_HIGH_WATER = 1024 * 1024; // above this we stop reading from the client
 
     final SocketChannel channel;
     SelectionKey key;                       // set right after registration
+    Session session;                        // set right after creation
     ByteBuffer in = ByteBuffer.allocate(INITIAL_BUFFER);
     ByteBuffer out = ByteBuffer.allocate(INITIAL_BUFFER);
     final RespWriter writer = new RespWriter(new OutputBuffer());
+    final ReplySink replies = writer::write; // where the replies to this client's commands go
     boolean closeAfterFlush;                // stop reading; close once the pending reply is sent
 
     Connection(SocketChannel channel) {
