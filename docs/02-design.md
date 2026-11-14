@@ -223,3 +223,32 @@ Each executed command is appended to the AOF individually.
 Consequence: Simple, fast and race-free on one thread. WATCH may abort when a write changed nothing, but never misses a
 conflict. A crash while a transaction's records are being appended could persist only part of it (a MULTI/EXEC wrapper in
 the AOF would fix this later). Arity errors surface at EXEC time instead of queue time.
+
+### ADR-28: The replication stream is the AOF record stream, counted in bytes; replicas are push targets
+Context: Replicas must apply exactly the master's effects, in order, including time-dependent commands.
+Decision: The master converts every executed command with the same CommandPropagator the AOF uses (so relative TTLs
+are already absolute) and appends the records to a backlog (a bounded list of commands with byte offsets) and to the
+output buffer of every attached replica, using the same Session.push path as pub/sub. The offset is the number of
+encoded bytes (checked against the real encoder in a test). A random replication ID names each history; a promoted
+replica starts a new one. Evictions are propagated as DEL.
+Consequence: Replication reuses tested code, replicas can never drift because of clock- or randomness-dependent
+commands, and a slow replica is dropped by the existing output-buffer limit and later resyncs.
+
+### ADR-29: Full resync = snapshot taken on the event loop; partial resync = backlog; replica link = thread + mailbox
+Context: A replica needs a consistent starting point and the ability to catch up cheaply after a short disconnect.
+Decision: PSYNC <id> <offset>: if the ID matches and the offset is inside the backlog, send +CONTINUE and the missed
+commands; otherwise +FULLRESYNC, a snapshot (serialized on the loop thread, hence consistent with the offset) and then
+the live stream. The replica uses one dedicated blocking-I/O thread for the connection; it never touches data but hands
+snapshots and batches of commands to the event loop with EventLoopServer.execute(), which applies them through the normal
+Dispatcher (so its own AOF, watchers and guards work). It reconnects with the number of bytes RECEIVED (not applied) to
+avoid applying anything twice, and ACKs the number APPLIED once a second.
+Consequence: Single-writer data access is preserved; no gap or duplicate is possible at the sync point. Limits: the
+snapshot must fit in one 64 MB output buffer, there is no heartbeat or timeout on the link, and no chained replication.
+
+### ADR-30: Read-only replicas via a composable guard; INFO decorated rather than replaced
+Context: Replicas must refuse client writes but accept the master's stream, and INFO is already defined elsewhere.
+Decision: CompositeGuard chains guards; ReadOnlyGuard rejects write commands while this server is a replica and the loop is
+not applying the master's stream (an "applying" flag set by the loop). The memory guard is skipped while applying.
+REPLICAOF/ROLE are normal commands; INFO is wrapped via CommandRouter.lookup so "INFO replication" and plain INFO both work.
+Consequence: No existing command had to learn about roles. Replicas expire keys on their own clock using absolute deadlines
+(real Redis lets the master send DEL), which is simpler but can differ briefly under clock skew.

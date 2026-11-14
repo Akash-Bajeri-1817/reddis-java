@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-/** Which keys does a write command modify? Used by WATCH to detect conflicting writes. */
+/** Which commands write, and which keys does a write command modify? (WATCH and read-only replicas need this.) */
 public final class WriteCommands {
 
     private static final Set<String> SINGLE_KEY = Set.of(
@@ -14,6 +14,11 @@ public final class WriteCommands {
             "ZADD", "ZREM", "ZINCRBY");
 
     private WriteCommands() { }
+
+    /** @param upperCaseName the command name in upper case */
+    public static boolean isWrite(String upperCaseName) {
+        return SINGLE_KEY.contains(upperCaseName) || upperCaseName.equals("DEL") || upperCaseName.equals("MSET");
+    }
 
     /**
      * @param upperCaseName the command name in upper case

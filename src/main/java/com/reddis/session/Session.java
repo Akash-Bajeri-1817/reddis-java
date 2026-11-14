@@ -34,8 +34,8 @@ public final class Session {
         this.sink = sink;
     }
 
-    /** Delivers a pushed message (pub/sub) to this client. */
-    void push(RespValue message) {
+    /** Pushes a message to this client (pub/sub messages, the replication stream). */
+    public void push(RespValue message) {
         sink.send(message);
     }
 

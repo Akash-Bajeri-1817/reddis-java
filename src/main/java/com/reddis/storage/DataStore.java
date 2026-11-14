@@ -402,6 +402,13 @@ public class DataStore {
         return remove(new ByteArrayKey(key)) != null;
     }
 
+    /** Removes every key (a replica does this before loading the master's snapshot). */
+    public void clear() {
+        for (ByteArrayKey key : new ArrayList<>(data.keySet())) {
+            remove(key); // goes through the bookkeeping: memory counter and both key indexes stay consistent
+        }
+    }
+
     /** Recounts every entry from scratch (O(n)). The running total must always equal this. */
     public long recomputeUsedMemory() {
         long total = 0;
