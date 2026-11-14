@@ -9,14 +9,17 @@ import com.reddis.storage.ByteArrayKey;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Runs one command for one client. Commands that depend on the connection's state (MULTI, EXEC, DISCARD, WATCH,
- * UNWATCH, the SUBSCRIBE family, and everything while in subscriber mode or inside a transaction) are handled
- * here; every other command goes straight to the CommandRouter.
+ * UNWATCH, the SUBSCRIBE family, registered session commands, and everything while in subscriber mode or inside a
+ * transaction) are handled here; every other command goes straight to the CommandRouter.
  *
  * Because it runs on the single event-loop thread, the commands of one EXEC execute back to back with nothing
  * else in between: that is the whole isolation guarantee.
@@ -31,12 +34,24 @@ public final class Dispatcher {
     private final PubSubBroker broker;
     private final WatchRegistry watches;
     private final CommandObserver observer;
+    private final Map<String, SessionCommand> sessionCommands = new HashMap<>();
+    private final List<Consumer<Session>> closeListeners = new ArrayList<>();
 
     public Dispatcher(CommandRouter router, PubSubBroker broker, WatchRegistry watches, CommandObserver observer) {
         this.router = router;
         this.broker = broker;
         this.watches = watches;
         this.observer = observer;
+    }
+
+    /** Registers a command that needs the client's Session (e.g. PSYNC). The name must be upper case. */
+    public void registerSessionCommand(String upperCaseName, SessionCommand command) {
+        sessionCommands.put(upperCaseName, command);
+    }
+
+    /** Called whenever a connection's session is closed. */
+    public void addSessionClosedListener(Consumer<Session> listener) {
+        closeListeners.add(listener);
     }
 
     /** Executes the command and sends every reply it produces to {@code out}. */
@@ -67,8 +82,11 @@ public final class Dispatcher {
                 out.send(OK);
             }
             default -> {
+                SessionCommand custom = sessionCommands.get(name);
                 if (session.inTransaction) {
-                    queue(session, name, command, out);
+                    queue(session, name, command, out); // session commands are not in the router: rejected here
+                } else if (custom != null) {
+                    custom.execute(session, args, out);
                 } else {
                     out.send(runAndObserve(name, command));
                 }
@@ -81,6 +99,9 @@ public final class Dispatcher {
         broker.removeAll(session);
         watches.unwatchAll(session);
         session.endTransaction();
+        for (Consumer<Session> listener : closeListeners) {
+            listener.accept(session);
+        }
     }
 
     // ------------------------------------------------------------ transactions
@@ -231,7 +252,7 @@ public final class Dispatcher {
 
     // -------------------------------------------------------------- execution
 
-    /** Runs a command through the router, lets the observer see it (AOF) and notes the keys it wrote (WATCH). */
+    /** Runs a command through the router, lets the observer see it (AOF, replication) and notes the keys it wrote. */
     private RespValue runAndObserve(String name, List<byte[]> command) throws IOException {
         RespValue reply = execute(command);
         observer.afterCommand(command, reply);

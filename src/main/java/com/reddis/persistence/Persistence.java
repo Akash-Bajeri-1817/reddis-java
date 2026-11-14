@@ -126,6 +126,21 @@ public final class Persistence implements CommandHooks {
         }
     }
 
+    /**
+     * The whole dataset was replaced (a replica finished a full resync): the old log no longer describes it, so it is
+     * rewritten from the new data, and the data counts as unsaved for the snapshot rules.
+     */
+    public void onDatasetReplaced() {
+        dirty.incrementAndGet();
+        if (aof != null) {
+            try {
+                aof.rewrite(store);
+            } catch (IOException e) {
+                System.err.println("AOF rewrite after the resync failed: " + e);
+            }
+        }
+    }
+
     /** Called periodically by the event loop. */
     public void cron() {
         long interval = config.saveIntervalSeconds();

@@ -24,7 +24,12 @@ public class CommandRouter {
         return commands.containsKey(upperCaseName);
     }
 
-    /** Installs a check that runs before every known command (see MemoryGuard). */
+    /** @return the registered command or null; lets a component wrap (decorate) an existing command */
+    public Command lookup(String upperCaseName) {
+        return commands.get(upperCaseName);
+    }
+
+    /** Installs a check that runs before every known command (see MemoryGuard, ReadOnlyGuard). */
     public void setGuard(CommandGuard guard) {
         this.guard = guard;
     }
@@ -42,7 +47,7 @@ public class CommandRouter {
         if (currentGuard != null) {
             RespValue denied = currentGuard.beforeExecute(name);
             if (denied != null) {
-                return denied; // e.g. -OOM: the command is not executed at all
+                return denied; // e.g. -OOM or -READONLY: the command is not executed at all
             }
         }
 
