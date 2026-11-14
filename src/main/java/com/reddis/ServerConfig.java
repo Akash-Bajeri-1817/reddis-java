@@ -4,15 +4,18 @@ import com.reddis.eviction.EvictionPolicy;
 import com.reddis.eviction.MemoryConfig;
 import com.reddis.persistence.FsyncPolicy;
 import com.reddis.persistence.PersistenceConfig;
+import com.reddis.replication.ReplicationConfig;
 
 import java.nio.file.Path;
 
 /** Command-line configuration. */
-public record ServerConfig(int port, boolean blocking, PersistenceConfig persistence, MemoryConfig memory) {
+public record ServerConfig(int port, boolean blocking, PersistenceConfig persistence, MemoryConfig memory,
+                           ReplicationConfig replication) {
 
     public static final String USAGE = """
             Usage: Main [port] [options]
-              --blocking                         legacy thread-per-client server (no persistence, no maxmemory)
+              --blocking                         legacy thread-per-client server (no persistence, maxmemory,
+                                                 pub/sub, transactions or replication)
               --dir <path>                       directory for dump.rdb and appendonly.aof (default: data)
               --appendonly yes|no                enable the append-only file (default: no)
               --appendfsync always|everysec|no   AOF fsync policy (default: everysec)
@@ -20,7 +23,9 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
               --maxmemory <size>                 memory limit, e.g. 100mb (default: 0 = unlimited)
               --maxmemory-policy <policy>        noeviction | allkeys-lru | volatile-lru | allkeys-lfu | volatile-lfu
                                                  | allkeys-random | volatile-random | volatile-ttl (default: noeviction)
-              --maxmemory-samples <n>            keys sampled per eviction (default: 5)""";
+              --maxmemory-samples <n>            keys sampled per eviction (default: 5)
+              --replicaof <host> <port>          start as a replica of that master
+              --repl-backlog-size <size>         replication backlog kept by a master (default: 1mb)""";
 
     public static ServerConfig parse(String... args) {
         int port = 6379;
@@ -32,6 +37,9 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
         long maxMemory = 0;
         EvictionPolicy policy = EvictionPolicy.NOEVICTION;
         int samples = 5;
+        String masterHost = null;
+        int masterPort = 0;
+        long backlogBytes = ReplicationConfig.DEFAULT_BACKLOG_BYTES;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -65,6 +73,18 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
                     samples = Integer.parseInt(valueAfter(args, i));
                     i++;
                 }
+                case "--replicaof" -> {
+                    if (i + 2 >= args.length) {
+                        throw new IllegalArgumentException("--replicaof needs a host and a port");
+                    }
+                    masterHost = args[i + 1];
+                    masterPort = Integer.parseInt(args[i + 2]);
+                    i += 2;
+                }
+                case "--repl-backlog-size" -> {
+                    backlogBytes = MemoryConfig.parseBytes(valueAfter(args, i));
+                    i++;
+                }
                 default -> {
                     if (arg.startsWith("--")) {
                         throw new IllegalArgumentException("Unknown option: " + arg);
@@ -75,7 +95,8 @@ public record ServerConfig(int port, boolean blocking, PersistenceConfig persist
         }
         return new ServerConfig(port, blocking,
                 new PersistenceConfig(dir, appendOnly, fsync, saveInterval),
-                new MemoryConfig(maxMemory, policy, samples));
+                new MemoryConfig(maxMemory, policy, samples),
+                new ReplicationConfig(masterHost, masterPort, backlogBytes));
     }
 
     private static String valueAfter(String[] args, int optionIndex) {

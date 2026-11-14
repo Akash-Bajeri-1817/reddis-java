@@ -21,15 +21,20 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 /**
  * A single-threaded, non-blocking server: ONE thread accepts connections, reads, executes every command
  * and writes replies (the same model as Redis). Because only this thread runs commands, each command,
  * every MULTI/EXEC block and every PUBLISH is atomic with respect to other clients.
+ *
+ * Other threads (like the replication link) never touch the data: they hand work to this thread with execute().
  */
-public class EventLoopServer {
+public class EventLoopServer implements Executor {
 
     private final int port;
     private final Dispatcher dispatcher;
@@ -38,11 +43,14 @@ public class EventLoopServer {
     private final CommandHooks hooks;
     private final RespDecoder decoder = new RespDecoder();
 
-    /** Connections that were handed pushed messages (pub/sub) during this event and must be flushed. */
+    /** Connections that were handed pushed messages (pub/sub, replication) during this event and must be flushed. */
     private final Set<Connection> pendingFlush = new LinkedHashSet<>();
 
+    /** Work handed over by other threads, run by the loop thread (the "mailbox"). */
+    private final Queue<Runnable> tasks = new ConcurrentLinkedQueue<>();
+
     private volatile boolean running;
-    private Selector selector;
+    private volatile Selector selector;
     private ServerSocketChannel serverChannel;
     private Thread loopThread;
 
@@ -78,17 +86,18 @@ public class EventLoopServer {
         if (running) {
             throw new IllegalStateException("Server already started");
         }
-        selector = Selector.open();
+        Selector opened = Selector.open();
         try {
             serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
             serverChannel.bind(new InetSocketAddress(port));
-            serverChannel.register(selector, SelectionKey.OP_ACCEPT); // we want to hear about new connections
+            serverChannel.register(opened, SelectionKey.OP_ACCEPT); // we want to hear about new connections
         } catch (IOException e) {
             closeQuietly(serverChannel);
-            closeQuietly(selector);
+            closeQuietly(opened);
             throw e;
         }
+        selector = opened;
 
         loopThread = new Thread(this::runLoop, "reddis-event-loop"); // non-daemon: keeps the JVM alive
         running = true;
@@ -98,6 +107,19 @@ public class EventLoopServer {
 
     public int getPort() {
         return serverChannel.socket().getLocalPort();
+    }
+
+    /**
+     * Runs a task on the event-loop thread, soon. Safe to call from any thread: this is how other threads hand
+     * work to the thread that owns the data.
+     */
+    @Override
+    public void execute(Runnable task) {
+        tasks.add(task);
+        Selector current = selector;
+        if (current != null) {
+            current.wakeup(); // do not wait for the next I/O event or timer
+        }
     }
 
     /** Stops the loop, closes every connection and waits for the loop thread to end. */
@@ -122,7 +144,7 @@ public class EventLoopServer {
         long nextRun = System.nanoTime() + periodNanos;
         try {
             while (running) {
-                // Sleep until a socket is ready, stop() wakes us, or the periodic task is due.
+                // Sleep until a socket is ready, execute()/stop() wake us, or the periodic task is due.
                 long waitMillis = Math.max(1, TimeUnit.NANOSECONDS.toMillis(nextRun - System.nanoTime()));
                 selector.select(waitMillis);
                 if (!running) {
@@ -134,8 +156,11 @@ public class EventLoopServer {
                     SelectionKey key = ready.next();
                     ready.remove(); // the selector never clears this set itself: forgetting this re-handles keys forever
                     dispatch(key);
-                    flushPendingPushes(); // subscribers that got a message during this event
+                    flushPendingPushes(); // subscribers/replicas that got a message during this event
                 }
+
+                runTasks();           // work handed over by other threads
+                flushPendingPushes();
 
                 if (System.nanoTime() - nextRun >= 0) {
                     runPeriodicTask();
@@ -146,6 +171,17 @@ public class EventLoopServer {
             System.err.println("Event loop failed: " + e);
         } finally {
             closeEverything();
+        }
+    }
+
+    private void runTasks() {
+        Runnable task;
+        while ((task = tasks.poll()) != null) {
+            try {
+                task.run();
+            } catch (RuntimeException e) {
+                System.err.println("Loop task failed: " + e);
+            }
         }
     }
 
@@ -236,15 +272,15 @@ public class EventLoopServer {
     // ------------------------------------------------------------------ push
 
     /**
-     * Pub/sub delivery: append a message to ANOTHER client's output buffer. We cannot flush it right here (we are in
-     * the middle of the publisher's command), so the target is queued for flushPendingPushes().
+     * Delivery to ANOTHER client's output buffer (pub/sub messages, the replication stream). We cannot flush it right
+     * here (we are in the middle of someone else's command), so the target is queued for flushPendingPushes().
      */
     private void push(Connection target, RespValue message) {
         try {
             target.writer.write(message);
             pendingFlush.add(target);
         } catch (IOException e) {
-            close(target); // a subscriber too slow to keep up (its buffer hit the limit) is dropped, like Redis does
+            close(target); // too slow to keep up (its buffer hit the limit): dropped, like Redis does
         }
     }
 
@@ -319,17 +355,18 @@ public class EventLoopServer {
 
     private void close(Connection c) {
         pendingFlush.remove(c);
-        dispatcher.sessionClosed(c.session); // drop its subscriptions, watches and half-built transaction
+        dispatcher.sessionClosed(c.session); // drop its subscriptions, watches, transaction, replica registration
         c.key.cancel();
         closeQuietly(c.channel);
     }
 
     private void closeEverything() {
-        if (selector != null) {
-            for (SelectionKey key : new ArrayList<>(selector.keys())) {
+        Selector current = selector;
+        if (current != null) {
+            for (SelectionKey key : new ArrayList<>(current.keys())) {
                 closeQuietly(key.channel());
             }
-            closeQuietly(selector);
+            closeQuietly(current);
         }
         closeQuietly(serverChannel);
     }

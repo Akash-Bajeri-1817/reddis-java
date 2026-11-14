@@ -2,13 +2,18 @@ package com.reddis;
 
 import com.reddis.command.CommandRegistry;
 import com.reddis.command.CommandRouter;
+import com.reddis.command.CompositeGuard;
 import com.reddis.command.PersistenceCommands;
 import com.reddis.eviction.MemoryCommands;
 import com.reddis.eviction.MemoryGuard;
 import com.reddis.persistence.Persistence;
 import com.reddis.persistence.PersistenceConfig;
+import com.reddis.replication.ReadOnlyGuard;
+import com.reddis.replication.Replication;
+import com.reddis.replication.ReplicationCommands;
 import com.reddis.server.EventLoopServer;
 import com.reddis.server.Server;
+import com.reddis.session.CommandObserver;
 import com.reddis.session.Dispatcher;
 import com.reddis.session.PubSubBroker;
 import com.reddis.session.PublishCommand;
@@ -56,16 +61,26 @@ public class Main {
         WatchRegistry watches = new WatchRegistry();
         router.register("PUBLISH", new PublishCommand(broker));
 
+        Replication replication = new Replication(store, config.replication(), config.persistence().dir());
+
         // Installed only AFTER the load: replaying a dataset must never trigger evictions.
-        MemoryGuard guard = new MemoryGuard(store, config.memory(), Clock.systemUTC(), new Random(), key -> {
+        MemoryGuard memoryGuard = new MemoryGuard(store, config.memory(), Clock.systemUTC(), new Random(), key -> {
             persistence.recordEviction(key); // logged to the AOF as DEL
             watches.touch(key);              // an evicted key counts as modified for WATCH
+            replication.recordEviction(key); // and replicas delete it too
         });
-        router.setGuard(guard);
-        MemoryCommands.register(router, guard, store);
+        router.setGuard(new CompositeGuard(
+                new ReadOnlyGuard(replication),                                   // replicas refuse client writes
+                name -> replication.isApplying() ? null : memoryGuard.beforeExecute(name))); // a replica applies as is
+        MemoryCommands.register(router, memoryGuard, store);
+        ReplicationCommands.register(router, replication); // after MemoryCommands: it decorates INFO
 
-        // The dispatcher runs every command; it tells the persistence layer about each executed command.
-        Dispatcher dispatcher = new Dispatcher(router, broker, watches, persistence::afterCommand);
+        // Every executed command goes to the AOF and, on a master, to the replicas.
+        CommandObserver observer = (command, reply) -> {
+            persistence.afterCommand(command, reply);
+            replication.afterCommand(command, reply);
+        };
+        Dispatcher dispatcher = new Dispatcher(router, broker, watches, observer);
 
         // Expiry purging and autosave run on the event-loop thread, between I/O events (like Redis's serverCron).
         Runnable cron = () -> {
@@ -73,19 +88,26 @@ public class Main {
             persistence.cron();
         };
         EventLoopServer server = new EventLoopServer(config.port(), dispatcher, cron, CRON_INTERVAL_MILLIS, persistence);
+        replication.attach(dispatcher, server, persistence, persistence::onDatasetReplaced);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            server.stop();       // first: no more commands
-            persistence.close(); // then: flush the log, finish background saves, final snapshot
+            replication.stop();  // first: stop following the master
+            server.stop();       // then: no more commands
+            persistence.close(); // finally: flush the log, finish background saves, final snapshot
         }, "reddis-shutdown"));
         server.start();
+
+        if (config.replication().isReplica()) {
+            replication.replicaOf(config.replication().masterHost(), config.replication().masterPort());
+        }
     }
 
     private static void runBlocking(ServerConfig config, CommandRouter router, DataStore store) throws IOException {
         PersistenceConfig persistence = config.persistence();
-        if (persistence.appendOnly() || persistence.saveIntervalSeconds() > 0 || config.memory().maxMemoryBytes() > 0) {
-            System.err.println("Warning: persistence, maxmemory, pub/sub and transactions require the event-loop "
-                    + "server; ignored with --blocking");
+        if (persistence.appendOnly() || persistence.saveIntervalSeconds() > 0 || config.memory().maxMemoryBytes() > 0
+                || config.replication().isReplica()) {
+            System.err.println("Warning: persistence, maxmemory, pub/sub, transactions and replication require the "
+                    + "event-loop server; ignored with --blocking");
         }
         ExpiryPurger purger = new ExpiryPurger(store, CRON_INTERVAL_MILLIS);
         purger.start();
