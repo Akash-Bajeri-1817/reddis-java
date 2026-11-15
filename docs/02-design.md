@@ -252,3 +252,17 @@ not applying the master's stream (an "applying" flag set by the loop). The memor
 REPLICAOF/ROLE are normal commands; INFO is wrapped via CommandRouter.lookup so "INFO replication" and plain INFO both work.
 Consequence: No existing command had to learn about roles. Replicas expire keys on their own clock using absolute deadlines
 (real Redis lets the master send DEL), which is simpler but can differ briefly under clock skew.
+
+### ADR-31: One command-spec table for write commands
+Context: Declaring a write command meant editing separate sets for AOF/replication propagation, WATCH key tracking, the
+memory guard and the read-only guard; forgetting one silently broke durability, replication or safety.
+Decision: CommandSpecs declares, for each write command, whether it grows memory, whether it propagates verbatim, and
+which arguments are keys. CommandPropagator, WriteCommands (WATCH, read-only guard) and MemoryGuard all read it, and a
+test checks that every declared command is registered.
+Consequence: A new write command is one line in one table; the consistency test catches typos and omissions.
+
+### ADR-32: Counters and appends as store-level read-modify-write; conditional SET is never logged when it fails
+Decision: INCR/APPEND run inside ConcurrentHashMap.compute with strict integer parsing and exact overflow detection and keep
+the key's timeout. SET NX/XX that does not apply returns nil and changes nothing; the propagator logs nothing for it, and a
+successful one is logged as a plain SET (+ PEXPIREAT), so replay and replicas never re-evaluate a condition.
+Consequence: Counters are atomic and replicate deterministically. KEYS is O(n) and blocks the loop (documented); SCAN is deferred.
