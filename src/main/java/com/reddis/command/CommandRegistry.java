@@ -2,7 +2,7 @@ package com.reddis.command;
 
 import com.reddis.storage.DataStore;
 
-/** Builds a router with all the data commands. (Persistence commands are added separately.) */
+/** Builds a router with all the data commands. (Persistence, pub/sub, memory and replication add their own.) */
 public final class CommandRegistry {
 
     private CommandRegistry() { }
@@ -20,6 +20,9 @@ public final class CommandRegistry {
         router.register("TYPE", new TypeCommand(store));
         router.register("DBSIZE", new DbSizeCommand(store));
         MultiKeyCommands.register(router, store);
+        CounterCommands.register(router, store);
+        StringCommands.register(router, store);
+        KeyspaceCommands.register(router, store);
 
         // expiry
         router.register("EXPIRE", new ExpireCommand("expire", store, 1_000));

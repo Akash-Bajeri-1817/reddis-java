@@ -4,11 +4,11 @@ import com.reddis.command.CommandGuard;
 import com.reddis.protocol.RespValue;
 import com.reddis.storage.DataStore;
 import com.reddis.storage.KeySample;
+import com.reddis.command.CommandSpecs;
 
 import java.time.Clock;
 import java.util.List;
 import java.util.Random;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -20,10 +20,6 @@ import java.util.function.Consumer;
  * Runs on the thread that executes commands (the event loop).
  */
 public final class MemoryGuard implements CommandGuard {
-
-    /** Commands that can increase memory use. Reads, DEL, pops and TTL changes are always allowed. */
-    private static final Set<String> GROWS_MEMORY =
-            Set.of("SET", "MSET", "LPUSH", "RPUSH", "HSET", "SADD", "ZADD", "ZINCRBY");
 
     private static final RespValue OOM =
             new RespValue.RespError("OOM command not allowed when used memory > 'maxmemory'.");
@@ -59,7 +55,7 @@ public final class MemoryGuard implements CommandGuard {
     @Override
     public RespValue beforeExecute(String commandName) {
         long limit = maxMemory;
-        if (limit <= 0 || !GROWS_MEMORY.contains(commandName)) {
+        if (limit <= 0 || !CommandSpecs.growsMemory(commandName)) {
             return null;
         }
         if (store.usedMemory() <= limit) {
