@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.nio.charset.StandardCharsets;
 
 /**
  * The in-memory storage: key -> typed value (string, list, hash, set, sorted set), with optional expiry,
@@ -41,6 +42,7 @@ public class DataStore {
     public static final long NO_EXPIRY = -1;
 
     // LFU counter parameters (the Redis defaults)
+    private static final long MAX_STRING_BYTES = 512L * 1024 * 1024; // the same limit as a bulk string
     private static final int LFU_INIT = 5;
     private static final int LFU_MAX = 255;
     private static final int LFU_LOG_FACTOR = 10;
@@ -406,6 +408,120 @@ public class DataStore {
     public void clear() {
         for (ByteArrayKey key : new ArrayList<>(data.keySet())) {
             remove(key); // goes through the bookkeeping: memory counter and both key indexes stay consistent
+        }
+    }
+
+    /**
+     * Adds delta to the integer stored as a string (a missing key counts as 0) and returns the new value.
+     * The timeout of an existing key is kept. Atomic for the key.
+     *
+     * @throws NotAnIntegerException if the current value is not a canonical decimal integer
+     * @throws ArithmeticException   if the result does not fit in a long (nothing is changed)
+     * @throws WrongTypeException    if the key holds another type
+     */
+    public long incrementBy(byte[] key, long delta) {
+        ByteArrayKey k = new ByteArrayKey(key);
+        long now = clock.millis();
+        long[] result = new long[1];
+
+        data.compute(k, (ignored, existing) -> {
+            boolean live = existing != null && !existing.isExpiredAt(now);
+            long current = 0;
+            if (live) {
+                if (!(existing.value instanceof StringValue string)) {
+                    throw new WrongTypeException();
+                }
+                current = parseInteger(string.bytes());
+                existing.touch(now, random);
+            }
+            long next = Math.addExact(current, delta);
+            result[0] = next;
+
+            RedisValue value = new StringValue(Long.toString(next).getBytes(StandardCharsets.US_ASCII));
+            Entry updated = live ? new Entry(value, existing.expireAtMillis, existing) : new Entry(value, NO_EXPIRY, now);
+            track(k, existing, updated);
+            return updated;
+        });
+        return result[0];
+    }
+
+    /** Appends bytes to the string at the key (creating it if missing) and returns the new length. Keeps the timeout. */
+    public long append(byte[] key, byte[] suffix) {
+        ByteArrayKey k = new ByteArrayKey(key);
+        long now = clock.millis();
+        long[] length = new long[1];
+
+        data.compute(k, (ignored, existing) -> {
+            boolean live = existing != null && !existing.isExpiredAt(now);
+            byte[] current = new byte[0];
+            if (live) {
+                if (!(existing.value instanceof StringValue string)) {
+                    throw new WrongTypeException();
+                }
+                current = string.bytes();
+                existing.touch(now, random);
+            }
+            if ((long) current.length + suffix.length > MAX_STRING_BYTES) {
+                throw new IllegalArgumentException("string exceeds the maximum allowed size");
+            }
+            byte[] combined = new byte[current.length + suffix.length];
+            System.arraycopy(current, 0, combined, 0, current.length);
+            System.arraycopy(suffix, 0, combined, current.length, suffix.length);
+            length[0] = combined.length;
+
+            RedisValue value = new StringValue(combined);
+            Entry updated = live ? new Entry(value, existing.expireAtMillis, existing) : new Entry(value, NO_EXPIRY, now);
+            track(k, existing, updated);
+            return updated;
+        });
+        return length[0];
+    }
+
+    /**
+     * Moves a key to a new name, with its value AND its timeout, replacing whatever the new name held.
+     * It takes two steps, so it is atomic only where one thread runs the commands (the event loop).
+     *
+     * @return false if the source key does not exist
+     */
+    public boolean rename(byte[] from, byte[] to) {
+        ByteArrayKey source = new ByteArrayKey(from);
+        ByteArrayKey target = new ByteArrayKey(to);
+        if (source.equals(target)) {
+            return live(source, false) != null;
+        }
+        Entry old = remove(source);
+        if (old == null || old.isExpiredAt(clock.millis())) {
+            return false;
+        }
+        put(target, new Entry(old.value, old.expireAtMillis, old));
+        if (old.expireAtMillis != NO_EXPIRY) {
+            expiryQueue.add(new ExpiryItem(target, old.expireAtMillis));
+        }
+        return true;
+    }
+
+    /** Strict decimal integer: optional minus, no leading zeros, no plus sign, no spaces (like Redis). */
+    private static long parseInteger(byte[] bytes) {
+        int length = bytes.length;
+        if (length == 0 || length > 20) {
+            throw new NotAnIntegerException();
+        }
+        int start = bytes[0] == '-' ? 1 : 0;
+        if (start == length) {
+            throw new NotAnIntegerException(); // just "-"
+        }
+        if (bytes[start] == '0' && (length - start > 1 || start == 1)) {
+            throw new NotAnIntegerException(); // "007", "-01" and "-0"
+        }
+        for (int i = start; i < length; i++) {
+            if (bytes[i] < '0' || bytes[i] > '9') {
+                throw new NotAnIntegerException();
+            }
+        }
+        try {
+            return Long.parseLong(new String(bytes, StandardCharsets.US_ASCII));
+        } catch (NumberFormatException e) {
+            throw new NotAnIntegerException(); // too big for a long
         }
     }
 

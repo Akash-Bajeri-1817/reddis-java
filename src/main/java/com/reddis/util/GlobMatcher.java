@@ -1,4 +1,4 @@
-package com.reddis.session;
+package com.reddis.util;
 
 /**
  * Redis-style glob matching on raw bytes: * (any sequence), ? (one byte), [abc], [a-z], [^abc] and \ to escape.

@@ -2,6 +2,7 @@ package com.reddis.session;
 
 import com.reddis.protocol.RespValue;
 import com.reddis.storage.ByteArrayKey;
+import com.reddis.util.GlobMatcher;
 
 import java.util.ArrayList;
 import java.util.HashMap;

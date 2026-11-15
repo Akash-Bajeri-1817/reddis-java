@@ -257,6 +257,9 @@ public final class Dispatcher {
         RespValue reply = execute(command);
         observer.afterCommand(command, reply);
         if (!(reply instanceof RespValue.RespError)) {
+            if (name.equals("FLUSHALL") || name.equals("FLUSHDB")) {
+                watches.touchAll(); // every key changed
+            }
             for (byte[] key : WriteCommands.modifiedKeys(name, command.subList(1, command.size()))) {
                 watches.touch(key);
             }
