@@ -48,6 +48,15 @@ public final class WatchRegistry {
         }
     }
 
+    /** FLUSHALL: every key changed, so every watcher is dirty. */
+    public void touchAll() {
+        for (Set<Session> sessions : watchers.values()) {
+            for (Session session : sessions) {
+                session.watchDirty = true;
+            }
+        }
+    }
+
     /** Number of distinct keys currently watched by anyone. */
     public int watchedKeyCount() {
         return watchers.size();
