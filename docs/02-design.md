@@ -195,6 +195,16 @@ policy is an enum constant that overrides score() (Strategy pattern). The guard 
 Consequence: Commands stay unaware of memory limits; a restart reproduces the post-eviction dataset; one command may overshoot
 the limit by its own size and at most 100 000 evictions run per command.
 
+### ADR-24: CI/CD pipeline
+Context: Merging locally and pushing makes CI a report rather than a gate, and the first release jar was not runnable
+(no Main-Class) and carried the SNAPSHOT version.
+Decision: ci.yml builds, runs all tests with a JaCoCo coverage gate (NFR-5), uploads reports on failure, then smoke-tests the
+exact tested jar with the real redis-cli (data types, kill -9 crash recovery with the AOF, eviction, graceful shutdown).
+release.yml runs on v* tags: sets the version from the tag, re-runs build, tests and smoke test, and publishes the jar to
+GitHub Releases (0.x as pre-release). Work lands on main through pull requests with required status checks.
+Consequence: Every module is verified end to end before it reaches main, releases are reproducible and runnable, and the
+requirements (coverage, crash safety) are enforced automatically.
+
 ### ADR-25: Session layer: per-connection state lives in a Dispatcher in front of the router
 Context: SUBSCRIBE and MULTI change how later commands on the same connection behave, but commands were stateless
 functions of (arguments) -> reply.
@@ -266,3 +276,10 @@ Decision: INCR/APPEND run inside ConcurrentHashMap.compute with strict integer p
 the key's timeout. SET NX/XX that does not apply returns nil and changes nothing; the propagator logs nothing for it, and a
 successful one is logged as a plain SET (+ PEXPIREAT), so replay and replicas never re-evaluate a condition.
 Consequence: Counters are atomic and replicate deterministically. KEYS is O(n) and blocks the loop (documented); SCAN is deferred.
+
+### ADR-33: The legacy blocking server stays, as a benchmark baseline only
+Context: The thread-per-client server (Modules 1-3) cannot support persistence, memory limits, pub/sub, transactions or
+replication, which all rely on single-threaded command execution.
+Decision: Keep Server/ClientHandler behind --blocking, documented as a baseline for the "virtual threads vs event loop"
+benchmark. It is not a supported production mode, and Main warns when features it lacks are requested.
+Consequence: The architectural evolution stays measurable and demonstrable at almost no maintenance cost.

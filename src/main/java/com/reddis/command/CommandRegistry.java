@@ -23,6 +23,7 @@ public final class CommandRegistry {
         CounterCommands.register(router, store);
         StringCommands.register(router, store);
         KeyspaceCommands.register(router, store);
+        CompatibilityCommands.register(router);
 
         // expiry
         router.register("EXPIRE", new ExpireCommand("expire", store, 1_000));

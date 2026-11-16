@@ -1,0 +1,43 @@
+name: Release
+
+# Runs only when a version tag is pushed, e.g.:  git tag -a v0.8.0 -m "..." && git push origin v0.8.0
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write   # needed to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Use the tag as the version (v0.8.0 becomes 0.8.0)
+        run: mvn -B -ntp versions:set -DnewVersion="${GITHUB_REF_NAME#v}" -DgenerateBackupPoms=false
+
+      - name: Build and test
+        run: mvn -B -ntp clean verify
+
+      - name: Install redis-tools
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: Smoke-test the exact jar being released
+        run: bash scripts/smoke-test.sh target/reddis-*.jar
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/reddis-*.jar
+          generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}   # 0.x versions are marked pre-release
