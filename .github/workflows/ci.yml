@@ -1,71 +1,82 @@
-name: Reddis CI/CD
+name: CI
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
-jobs:
-  # CI: Verifies code compilation, runs unit tests, and tests live socket interaction
-  build-and-test:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+# a newer push to the same branch/PR cancels the run that is still going
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '21'
-          distribution: 'temurin'
           cache: maven
 
-      - name: Compile and Run Test Suite
-        run: mvn clean verify
+      - name: Compile, run all tests, check coverage
+        run: mvn -B -ntp clean verify
 
-      - name: Live Smoke Test with redis-tools
-        run: |
-          # 1. Install native redis-tools on the runner
-          sudo apt-get update && sudo apt-get install -y redis-tools
-          
-          # 2. Start Reddis daemon in the background
-          java -cp target/classes com.reddis.Main &
-          SERVER_PID=$!
-          sleep 2
-          
-          # 3. Verify server responds over TCP
-          redis-cli -p 6379 PING
-          redis-cli -p 6379 ECHO "CI-Network-Check-Passed"
-          
-          # 4. Clean up the process
-          kill -9 $SERVER_PID
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports
 
-  # CD: Runs only when pushing a semantic tag (e.g., git push origin v0.7.0)
-  publish-release:
-    needs: build-and-test
-    if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco
+          if-no-files-found: ignore
+
+      - name: Keep the jar for the smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddis-jar
+          path: target/reddis-*.jar
+
+  smoke:
+    name: Smoke test with the real redis-cli
+    needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '21'
-          distribution: 'temurin'
 
-      - name: Package Standalone JAR
-        run: mvn clean package -DskipTests
-
-      - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - name: Download the jar that was just tested
+        uses: actions/download-artifact@v4
         with:
-          files: target/*.jar
-          generate_release_notes: true
+          name: reddis-jar
+          path: jar
+
+      - name: Install redis-tools
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: Run the smoke test against the jar
+        run: bash scripts/smoke-test.sh jar/reddis-*.jar
