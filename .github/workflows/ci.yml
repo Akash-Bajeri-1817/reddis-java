@@ -70,7 +70,7 @@ jobs:
           java-version: '21'
 
       - name: Download the jar that was just tested
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: reddis-jar
           path: jar
